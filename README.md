@@ -27,7 +27,7 @@ Kraken LLM Framework предоставляет единый интерфейс 
 
 ```bash
 # Из исходников
-git clone https://github.com/example/kraken-llm
+git clone https://github.com/antonshalin76/kraken_llm
 cd kraken-llm
 pip install -e .
 

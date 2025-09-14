@@ -6,7 +6,7 @@
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/example/kraken-llm
+git clone https://github.com/antonshalin76/kraken_llm
 cd kraken-llm
 
 # Установка зависимостей
