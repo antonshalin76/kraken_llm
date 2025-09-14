@@ -1,30 +1,43 @@
-name: Publish Python 🐍 distribution 📦 to PyPI
+name: Publish Python package to PyPI
 
 on:
   push:
     tags:
-      - "v*"
-
-permissions:
-  id-token: write  # обязательно для trusted publishing!
+      - 'v*'  # срабатывает на пуш тегов, начинающихся с "v"
 
 jobs:
-  publish-to-pypi:
+  build-and-publish:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/kraken_llm
     permissions:
-      id-token: write      
+      contents: read
+      id-token: write  # обязательно для trusted publishing
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # нужно чтобы получить все теги и историю
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-      - name: Install build
+          python-version: '3.x'
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+
+      - name: Update version in pyproject.toml
+        run: |
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+
+      - name: Install build tools
         run: python -m pip install --upgrade build
-      - name: Build package
+
+      - name: Build distribution
         run: python -m build
-      - name: Publish package to PyPI
+
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
