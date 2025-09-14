@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "kraken-llm"
+name = "kraken_llm"
 version = "0.1.0"
 description = "Universal LLM framework with full OpenAI API support"
 readme = "README.md"
@@ -26,34 +26,33 @@ keywords = ["llm", "openai", "ai", "machine-learning", "async", "streaming"]
 requires-python = ">=3.10"
 
 dependencies = [
-    "openai>=1.0.0",
-    "outlines>=0.0.30",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "httpx>=0.25.0",
-    "Pillow>=10.0.0",
+    "openai",
+    "outlines",
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+    "Pillow",
 ]
 
 [project.optional-dependencies]
 demo = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "fastapi",
+    "uvicorn",
 ]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-mock>=3.11.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "mypy>=1.5.0",
-    "coverage>=7.0.0",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "black",
+    "isort",
+    "mypy",
+    "coverage",
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/kraken-llm"
-Documentation = "https://kraken-llm.readthedocs.io"
-Repository = "https://github.com/example/kraken-llm"
-Issues = "https://github.com/example/kraken-llm/issues"
+Homepage = "https://github.com/antonshalin76/kraken_llm"
+Repository = "https://github.com/antonshalin76/kraken_llm"
+Issues = "https://github.com/antonshalin76/kraken_llm/issues"
 
 [tool.black]
 line-length = 88
