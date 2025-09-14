@@ -642,6 +642,5 @@ MIT License - делайте что хотите ;-). См. файл [LICENSE](L
 
 ## Поддержка
 
-- Документация: [docs/](docs/)
 - Примеры: [examples/](examples/)
 - Тесты: [tests/](tests/)
