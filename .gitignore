@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.env
+.env.sgr
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+sgr_venv/
+logs/
+model_capabilities_analyzer.log

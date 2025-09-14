@@ -1,0 +1,55 @@
+# Kraken LLM Framework - Development Requirements
+# Зависимости для разработки, тестирования и демо
+
+# Включаем основные зависимости
+-r requirements.txt
+
+# === Тестирование ===
+# Pytest для тестирования
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov
+
+# Coverage для анализа покрытия кода
+coverage
+
+# === Форматирование и линтинг ===
+# Black для форматирования кода
+black
+
+# isort для сортировки импортов
+isort
+
+# MyPy для проверки типов
+mypy
+
+# Flake8 для дополнительных проверок
+flake8
+
+# === Демо-приложение ===
+# FastAPI для веб-интерфейса
+fastapi
+
+# Uvicorn для запуска сервера
+uvicorn
+
+# === Документация ===
+# Sphinx для генерации документации (опционально)
+# sphinx
+# sphinx-rtd-theme
+
+# === Дополнительные инструменты разработки ===
+# Pre-commit для git hooks (опционально)
+# pre-commit
+
+# Jupyter для экспериментов (опционально)
+# jupyter
+# ipython
+
+# === Профилирование и отладка ===
+# Memory profiler (опционально)
+# memory-profiler
+
+# Line profiler (опционально)
+# line-profiler

@@ -1,0 +1,47 @@
+# Kraken LLM Framework - Production Requirements
+# Основные зависимости для работы фреймворка
+
+# === Основные зависимости ===
+# OpenAI API клиент для взаимодействия с LLM
+openai
+
+# Outlines для структурированного вывода
+outlines
+
+# Pydantic для валидации данных и настроек
+pydantic
+pydantic-settings
+
+# HTTP клиент для сетевых запросов
+httpx
+
+# === Обработка медиа файлов ===
+# Pillow для работы с изображениями
+Pillow
+
+# === Научные вычисления ===
+# NumPy для работы с векторами embeddings
+numpy
+
+# === Дополнительные утилиты ===
+# python-dotenv для загрузки переменных окружения из .env файлов
+python-dotenv
+
+# === Системные зависимости ===
+# Typing extensions для совместимости с Python 3.10+
+typing-extensions
+
+# === Опциональные зависимости для демо ===
+# Раскомментируйте если нужно демо-приложение:
+# fastapi
+# uvicorn
+
+# === Зависимости для разработки ===
+# Раскомментируйте для разработки:
+# pytest
+# pytest-asyncio
+# pytest-mock
+# black
+# isort
+# mypy
+# coverage
