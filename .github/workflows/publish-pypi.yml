@@ -1,8 +1,9 @@
 name: Publish Python 🐍 distribution 📦 to PyPI
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   id-token: write  # обязательно для trusted publishing!
@@ -12,7 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/kraken-llm
+      url: https://pypi.org/project/kraken_llm
+    permissions:
+      id-token: write      
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
