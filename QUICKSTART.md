@@ -5,6 +5,9 @@
 ## Установка
 
 ```bash
+# Пакетом из PyPI
+pip install kraken-llm
+
 # Клонирование репозитория
 git clone https://github.com/antonshalin76/kraken_llm
 cd kraken-llm

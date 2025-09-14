@@ -26,6 +26,9 @@ Kraken LLM Framework предоставляет единый интерфейс 
 ### Базовая установка
 
 ```bash
+# Пакетом из PyPI
+pip install kraken-llm
+
 # Из исходников
 git clone https://github.com/antonshalin76/kraken_llm
 cd kraken-llm
