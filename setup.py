@@ -57,17 +57,16 @@ extras_require["all"] = [
 
 setup(
     name="kraken-llm",
-    version="0.1.0",
+    version="0.1.1",
     description="Universal LLM framework with full OpenAI API support and unified multi-client interface",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Anton Shalin",
-    author_email="ashalin@it-one.ru",
-    url="https://github.com/example/kraken-llm",
+    author_email="anton.shalin@gmail.com",
+    url="https://github.com/antonshalin76/kraken_llm",
     project_urls={
-        "Documentation": "https://kraken-llm.readthedocs.io",
-        "Repository": "https://github.com/example/kraken-llm",
-        "Issues": "https://github.com/example/kraken-llm/issues",
+        "Repository": "https://github.com/antonshalin76/kraken_llm",
+        "Issues": "https://github.com/antonshalin76/kraken_llm/issues",
     },
     packages=find_packages(where="src"),
     package_dir={"": "src"},
