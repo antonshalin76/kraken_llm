@@ -7,6 +7,9 @@
 """
 
 import asyncio
+import os
+from dotenv import load_dotenv
+
 from kraken_llm.client.reasoning import (
     ReasoningLLMClient, 
     ReasoningConfig, 
@@ -14,6 +17,7 @@ from kraken_llm.client.reasoning import (
 )
 from kraken_llm.config.settings import LLMConfig
 
+load_dotenv()
 
 async def native_thinking_basic_example():
     """Базовый пример работы с нативной рассуждающей моделью"""
@@ -21,9 +25,9 @@ async def native_thinking_basic_example():
     
     # Настройка для нативной рассуждающей модели
     config = LLMConfig(
-        endpoint="http://10.129.0.37:8082",
-        api_key="auth_7313ff09b5b24e529786c48f1bfc068c",
-        model="thinking-model",  # Модель с поддержкой thinking
+        endpoint=os.getenv("LLM_REASONING_ENDPOINT"),
+        api_key=os.getenv("LLM_REASONING_TOKEN"),
+        model=os.getenv("LLM_REASONING_MODEL"),
         temperature=0.1
     )
     

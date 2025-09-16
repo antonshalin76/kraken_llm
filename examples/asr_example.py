@@ -15,6 +15,8 @@ import asyncio
 import tempfile
 from pathlib import Path
 import logging
+import os
+from dotenv import load_dotenv
 
 from kraken_llm.client.asr import ASRClient, ASRConfig
 from kraken_llm.client.multimodal import MultimodalLLMClient, MultimodalConfig
@@ -24,6 +26,14 @@ from kraken_llm.config.settings import LLMConfig
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+load_dotenv()
+
+# Создаем конфигурацию
+config = LLMConfig(
+    endpoint=os.getenv("ASR_ENDPOINT"),
+    api_key=os.getenv("ASR_TOKEN"),
+    model=os.getenv("ASR_MODEL")
+)
 
 def create_test_audio_file(filename: str, duration_seconds: int = 5) -> Path:
     """
@@ -72,14 +82,6 @@ async def demo_basic_asr_functionality():
     print("\n" + "="*60)
     print("ДЕМОНСТРАЦИЯ БАЗОВОЙ ФУНКЦИОНАЛЬНОСТИ ASR")
     print("="*60)
-    
-    # Создаем конфигурацию
-    config = LLMConfig(
-        endpoint="http://10.129.0.37:8082",
-        api_key="auth_7313ff09b5b24e529786c48f1bfc068c",
-        model="chat",
-        temperature=0.7
-    )
     
     asr_config = ASRConfig(
         default_language="ru",
@@ -243,12 +245,6 @@ async def demo_comprehensive_analysis():
     print("ДЕМОНСТРАЦИЯ КОМПЛЕКСНОГО АНАЛИЗА АУДИО")
     print("="*60)
     
-    config = LLMConfig(
-        endpoint="http://10.129.0.37:8082",
-        api_key="auth_7313ff09b5b24e529786c48f1bfc068c",
-        model="chat"
-    )
-    
     client = ASRClient(config)
     
     # Создаем несколько тестовых файлов
@@ -316,12 +312,6 @@ async def demo_multimodal_integration():
     print("\n" + "="*60)
     print("ДЕМОНСТРАЦИЯ ИНТЕГРАЦИИ С МУЛЬТИМОДАЛЬНЫМ КЛИЕНТОМ")
     print("="*60)
-    
-    config = LLMConfig(
-        endpoint="http://10.129.0.37:8082",
-        api_key="auth_7313ff09b5b24e529786c48f1bfc068c",
-        model="chat"
-    )
     
     multimodal_config = MultimodalConfig()
     

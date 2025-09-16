@@ -8,11 +8,13 @@
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Добавляем путь к модулям Kraken LLM
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -59,13 +61,13 @@ def calculate_sum(a: int, b: int) -> int:
     return a + b
 
 
-async def demo_basic_usage():
+async def demo_basic_usage(config: LLMConfig):
     """Демонстрация базового использования"""
     print("🔧 Демонстрация базового использования UniversalLLMClient")
     print("=" * 60)
     
     # Создание базового клиента
-    async with create_basic_client() as client:
+    async with create_basic_client(config) as client:
         print(f"Доступные возможности: {client.get_available_capabilities()}")
         print(f"Активные клиенты: {client.get_active_clients()}")
         
@@ -86,13 +88,13 @@ async def demo_basic_usage():
             print()
 
 
-async def demo_advanced_usage():
+async def demo_advanced_usage(config: LLMConfig):
     """Демонстрация продвинутого использования"""
     print("\n🚀 Демонстрация продвинутого использования")
     print("=" * 60)
     
     # Создание продвинутого клиента
-    async with create_advanced_client() as client:
+    async with create_advanced_client(config) as client:
         print(f"Доступные возможности: {client.get_available_capabilities()}")
         
         # Регистрируем функции и инструменты
@@ -141,7 +143,7 @@ async def demo_advanced_usage():
                 print(f"Reasoning недоступен: {e}")
 
 
-async def demo_custom_configuration():
+async def demo_custom_configuration(config: LLMConfig):
     """Демонстрация кастомной конфигурации"""
     print("\n⚙️ Демонстрация кастомной конфигурации")
     print("=" * 60)
@@ -154,7 +156,6 @@ async def demo_custom_configuration():
         UniversalCapability.EMBEDDINGS,
     }
     
-    config = LLMConfig()
     universal_config = UniversalClientConfig(
         capabilities=custom_capabilities,
         prefer_streaming=True,
@@ -183,7 +184,7 @@ async def demo_custom_configuration():
                 print(f"Embeddings недоступны: {e}")
 
 
-async def demo_from_capabilities_report():
+async def demo_from_capabilities_report(config: LLMConfig):
     """Демонстрация создания клиента из отчета анализатора"""
     print("\n📊 Демонстрация создания из отчета анализатора")
     print("=" * 60)
@@ -203,7 +204,7 @@ async def demo_from_capabilities_report():
     }
     
     # Создаем клиент на основе отчета
-    async with create_universal_client_from_report(mock_report, model_name="test_model") as client:
+    async with create_universal_client_from_report(mock_report, config=config, model_name="test_model") as client:
         print(f"Возможности из отчета: {client.get_available_capabilities()}")
         
         # Информация о клиенте
@@ -213,27 +214,27 @@ async def demo_from_capabilities_report():
             print(f"  {key}: {value}")
 
 
-async def demo_convenience_functions():
+async def demo_convenience_functions(config: LLMConfig):
     """Демонстрация удобных функций создания"""
     print("\n🎯 Демонстрация удобных функций создания")
     print("=" * 60)
     
     # Базовый клиент
     print("Базовый клиент:")
-    async with create_basic_client() as client:
+    async with create_basic_client(config) as client:
         capabilities = client.get_available_capabilities()
         print(f"  Возможности: {capabilities}")
     
     # Продвинутый клиент
     print("\nПродвинутый клиент:")
-    async with create_advanced_client() as client:
+    async with create_advanced_client(config) as client:
         capabilities = client.get_available_capabilities()
         print(f"  Возможности: {capabilities}")
     
     # Полнофункциональный клиент
     print("\nПолнофункциональный клиент:")
     try:
-        async with create_full_client() as client:
+        async with create_full_client(config) as client:
             capabilities = client.get_available_capabilities()
             print(f"  Возможности: {capabilities}")
     except Exception as e:
@@ -246,12 +247,12 @@ async def demo_convenience_functions():
         UniversalCapability.STRUCTURED_OUTPUT
     }
     
-    async with create_universal_client(capabilities=custom_caps) as client:
+    async with create_universal_client(config=config, capabilities=custom_caps) as client:
         capabilities = client.get_available_capabilities()
         print(f"  Возможности: {capabilities}")
 
 
-async def demo_error_handling():
+async def demo_error_handling(config: LLMConfig):
     """Демонстрация обработки ошибок"""
     print("\n⚠️ Демонстрация обработки ошибок")
     print("=" * 60)
@@ -262,7 +263,7 @@ async def demo_error_handling():
         auto_fallback=False
     )
     
-    async with UniversalLLMClient(LLMConfig(), basic_config) as client:
+    async with UniversalLLMClient(config, basic_config) as client:
         # Попытка использовать недоступную возможность
         try:
             await client.chat_completion_structured([
@@ -287,7 +288,7 @@ async def demo_error_handling():
             print(f"Неожиданная ошибка chat completion: {e}")
 
 
-async def demo_performance_comparison():
+async def demo_performance_comparison(config: LLMConfig):
     """Демонстрация сравнения производительности"""
     print("\n⚡ Демонстрация сравнения производительности")
     print("=" * 60)
@@ -298,13 +299,13 @@ async def demo_performance_comparison():
     
     # Тест с базовым клиентом
     start_time = time.time()
-    async with create_basic_client() as client:
+    async with create_basic_client(config) as client:
         response1 = await client.chat_completion(messages, max_tokens=50)
     basic_time = time.time() - start_time
     
     # Тест с продвинутым клиентом
     start_time = time.time()
-    async with create_advanced_client() as client:
+    async with create_advanced_client(config) as client:
         response2 = await client.chat_completion(messages, max_tokens=50)
     advanced_time = time.time() - start_time
     
@@ -319,26 +320,28 @@ async def main():
     print("=" * 80)
     
     try:
+        config = LLMConfig()
+        
         # Базовое использование
-        await demo_basic_usage()
+        await demo_basic_usage(config)
         
         # Продвинутое использование
-        await demo_advanced_usage()
+        await demo_advanced_usage(config)
         
         # Кастомная конфигурация
-        await demo_custom_configuration()
+        await demo_custom_configuration(config)
         
         # Создание из отчета анализатора
-        await demo_from_capabilities_report()
+        await demo_from_capabilities_report(config)
         
         # Удобные функции
-        await demo_convenience_functions()
+        await demo_convenience_functions(config)
         
         # Обработка ошибок
-        await demo_error_handling()
+        await demo_error_handling(config)
         
         # Сравнение производительности
-        await demo_performance_comparison()
+        await demo_performance_comparison(config)
         
         print("\n✅ Все демонстрации завершены успешно!")
         

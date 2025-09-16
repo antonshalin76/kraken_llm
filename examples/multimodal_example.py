@@ -14,9 +14,13 @@ import tempfile
 from pathlib import Path
 from PIL import Image, ImageDraw
 import logging
+import os
+from dotenv import load_dotenv
 
 from kraken_llm.client.multimodal import MultimodalLLMClient, MultimodalConfig
 from kraken_llm.config.settings import LLMConfig
+
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -103,9 +107,9 @@ async def demo_vision_analysis():
     
     # Создаем конфигурацию
     config = LLMConfig(
-        endpoint="http://10.129.0.37:8082",
-        api_key="auth_7313ff09b5b24e529786c48f1bfc068c",
-        model="chat",
+        endpoint=os.getenv("MULTIMODAL_ENDPOINT"),
+        api_key=os.getenv("MULTIMODAL_TOKEN"),
+        model=os.getenv("MULTIMODAL_MODEL"),
         temperature=0.7,
         max_tokens=500
     )

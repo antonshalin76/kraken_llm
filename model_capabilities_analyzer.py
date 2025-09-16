@@ -29,7 +29,7 @@ import time
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Set, Union, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 import logging
@@ -42,8 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 # Импорты Kraken LLM
 try:
     from kraken_llm.config.settings import LLMConfig
-    from kraken_llm.client.factory import ClientFactory
-    from kraken_llm.client.adaptive import AdaptiveLLMClient, AdaptiveConfig, ModelCapability
+    from kraken_llm.client.adaptive import AdaptiveLLMClient, AdaptiveConfig
     from kraken_llm.client.standard import StandardLLMClient
     from kraken_llm.client.streaming import StreamingLLMClient
     from kraken_llm.client.structured import StructuredLLMClient
@@ -52,9 +51,7 @@ try:
     from kraken_llm.client.asr import ASRClient, ASRConfig
     from kraken_llm.client.embeddings import EmbeddingsLLMClient
     from kraken_llm.client.completion import CompletionLLMClient
-    from kraken_llm.exceptions.base import KrakenError
     from kraken_llm.tools import register_function, register_tool
-    from kraken_llm.utils.media import MediaUtils
 except ImportError as e:
     print(f"❌ Ошибка импорта Kraken LLM: {e}")
     print("Убедитесь, что Kraken LLM установлен: pip install -e .")
@@ -235,6 +232,7 @@ class ModelCapabilitiesAnalyzer:
             ("MULTIMODAL", ModelType.MULTIMODAL, "Мультимодальная модель"),
             ("ASR", ModelType.ASR, "ASR модель для речевых технологий"),
             ("REASONING", ModelType.REASONING, "Рассуждающая модель"),
+            ("LLM_REASONING", ModelType.REASONING, "Reasoning модель (LLM_REASONING_*)"),
             ("LLM", ModelType.UNIVERSAL, "Универсальная модель (обратная совместимость)")
         ]
         
@@ -314,6 +312,63 @@ class ModelCapabilitiesAnalyzer:
             except ValueError:
                 logger.warning(f"Некорректное значение для {key}: {value}")
         return None
+    
+    def _is_thinking_model(self, model_config: ModelConfig) -> bool:
+        """Эвристически определяет, является ли модель нативной reasoning/thinking моделью.
+        Возвращает True, если следует включить режимы/тесты для native thinking.
+        """
+        try:
+            # 1) Явный тип модели
+            if model_config.model_type == ModelType.REASONING:
+                return True
+
+            # 2) Подсказки из окружения
+            env_keys_true = {
+                "REASONING_MODEL_TYPE",
+                "LLM_REASONING_MODEL_TYPE",
+                "LLM_THINKING_ENABLED",
+                "REASONING_ENABLE_NATIVE_THINKING",
+                "LLM_EXPOSE_THINKING",
+            }
+            for key in env_keys_true:
+                val = os.getenv(key)
+                if val and str(val).strip().lower() in {"1", "true", "yes", "y", "on", "native", "native_thinking", "thinking"}:
+                    return True
+
+            # 3) Эвристики по названию модели/провайдера/описанию
+            text = " ".join(filter(None, [
+                model_config.name,
+                model_config.model,
+                model_config.description,
+                model_config.provider,
+            ])).lower()
+
+            indicators = [
+                "thinking",
+                "reasoning",
+                "deepseek-r",
+                "deepseek r",
+                "r1",
+                "r1-distill",
+                "qwq",
+                "qwen2.5-r",
+                "qwen2.5-r1",
+                "qwen2.5-think",
+                "sonnet-thinking",
+                "o3",
+                "o4",
+            ]
+            if any(ind in text for ind in indicators):
+                return True
+
+            # 4) Провайдер-специфика: Anthropic Claude thinking-варианты
+            if "claude" in text and "thinking" in text:
+                return True
+
+            return False
+        except Exception:
+            # Консервативно выключаем thinking при ошибке
+            return False
     
     async def analyze_all_models(self, quick_mode: bool = False) -> Dict[str, Any]:
         """
@@ -443,6 +498,9 @@ class ModelCapabilitiesAnalyzer:
         """Определение клиентов для тестирования конкретной модели"""
         clients = []
         
+        # Быстрая эвристика: модель с native thinking?
+        is_thinking_model = self._is_thinking_model(model_config)
+        
         # Базовые клиенты для всех типов моделей (кроме embedding)
         if model_config.model_type != ModelType.EMBEDDING:
             clients.extend([
@@ -450,15 +508,39 @@ class ModelCapabilitiesAnalyzer:
                 (ClientType.STREAMING, StreamingLLMClient, None),
             ])
             
+            # В полном режиме — тестируем больше клиентов
             if not quick_mode:
                 clients.extend([
                     (ClientType.STRUCTURED, StructuredLLMClient, None),
-                    (ClientType.REASONING, ReasoningLLMClient, ReasoningConfig(
-                        model_type=ReasoningModelType.PROMPT_BASED,
-                        enable_cot=True
-                    )),
                     (ClientType.MULTIMODAL, MultimodalLLMClient, MultimodalConfig()),
                 ])
+            
+            # Reasoning клиент: всегда добавляем для thinking‑моделей, даже в quick
+            if is_thinking_model or (not quick_mode):
+                # Пытаемся настроить конфиг из окружения
+                native = ReasoningModelType.NATIVE_THINKING if is_thinking_model else ReasoningModelType.PROMPT_BASED
+                rc = ReasoningConfig(
+                    model_type=native,
+                    enable_cot=not is_thinking_model,
+                    enable_thinking=True if is_thinking_model else None,
+                )
+                # Лимиты/температуры из окружения (REASONING_*/LLM_*)
+                max_thinking = os.getenv("REASONING_MAX_THINKING_TOKENS") or os.getenv("LLM_MAX_THINKING_TOKENS")
+                if max_thinking:
+                    try:
+                        rc.thinking_max_tokens = int(max_thinking)
+                    except ValueError:
+                        pass
+                ttemp = os.getenv("LLM_THINKING_TEMPERATURE") or os.getenv("REASONING_THINKING_TEMPERATURE")
+                if ttemp:
+                    try:
+                        rc.thinking_temperature = float(ttemp)
+                    except ValueError:
+                        pass
+                expose = os.getenv("LLM_EXPOSE_THINKING")
+                if expose is not None:
+                    rc.expose_thinking = str(expose).lower() in {"1", "true", "yes", "y", "on"}
+                clients.append((ClientType.REASONING, ReasoningLLMClient, rc))
         
         # Специализированные клиенты
         if model_config.model_type == ModelType.EMBEDDING:
@@ -475,6 +557,8 @@ class ModelCapabilitiesAnalyzer:
     def _get_tests_for_client(self, client_type: ClientType, model_config: ModelConfig, quick_mode: bool) -> List[Tuple[Any, CapabilityType]]:
         """Получение тестов для конкретного клиента"""
         tests = []
+        
+        is_thinking_model = self._is_thinking_model(model_config)
         
         # Базовые тесты
         if client_type in [ClientType.STANDARD, ClientType.STREAMING, ClientType.REASONING, ClientType.MULTIMODAL]:
@@ -502,11 +586,12 @@ class ModelCapabilitiesAnalyzer:
             if not quick_mode:
                 tests.append((self._test_similarity_search, CapabilityType.SIMILARITY_SEARCH))
         
-        if client_type == ClientType.REASONING and not quick_mode:
-            tests.extend([
-                (self._test_reasoning_cot, CapabilityType.REASONING_COT),
-                (self._test_reasoning_native_thinking, CapabilityType.REASONING_NATIVE_THINKING),
-            ])
+        if client_type == ClientType.REASONING:
+            # Для thinking‑моделей подтверждаем REASONING_NATIVE_THINKING даже в quick
+            if is_thinking_model:
+                tests.append((self._test_reasoning_native_thinking, CapabilityType.REASONING_NATIVE_THINKING))
+            if not quick_mode:
+                tests.append((self._test_reasoning_cot, CapabilityType.REASONING_COT))
         
         if client_type == ClientType.MULTIMODAL and not quick_mode:
             tests.append((self._test_multimodal_vision, CapabilityType.MULTIMODAL_VISION))

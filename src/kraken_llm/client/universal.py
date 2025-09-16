@@ -12,7 +12,6 @@ Universal Multi-Client для Kraken LLM
 - Легко переключаться между возможностями
 """
 
-import asyncio
 import logging
 from typing import Dict, List, Any, Optional, Union, Set, Type, AsyncGenerator
 from dataclasses import dataclass, field
@@ -30,10 +29,11 @@ from .streaming import StreamingLLMClient
 from .structured import StructuredLLMClient
 from .reasoning import ReasoningLLMClient, ReasoningConfig, ReasoningModelType
 from .multimodal import MultimodalLLMClient, MultimodalConfig
-from .adaptive import AdaptiveLLMClient, AdaptiveConfig, ModelCapability
+from .adaptive import AdaptiveLLMClient, AdaptiveConfig
 from .asr import ASRClient, ASRConfig
 from .embeddings import EmbeddingsLLMClient
 from .completion import CompletionLLMClient
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -261,50 +261,92 @@ class UniversalLLMClient(BaseLLMClient):
 
         logger.info("Инициализация специализированных клиентов...")
 
-        # Всегда создаем базовый клиент
-        self._clients['standard'] = StandardLLMClient(self.config)
+        # Базовые kwargs из текущего config для наследования не сетевых параметров
+        base_kwargs = self.config.model_dump()
 
-        # Создаем клиенты на основе конфигурации
+        # Локальный хелпер: выбрать профильный конфиг из .env
+        def _create_config_for_client_type(client_type: str, base_kwargs_local: Dict[str, Any]) -> LLMConfig:
+            profile_map = {
+                'standard': ['CHAT', 'LLM'],
+                'streaming': ['CHAT', 'LLM'],
+                'structured': ['CHAT', 'LLM'],
+                'reasoning': ['LLM_REASONING', 'REASONING', 'LLM'],
+                'multimodal': ['MULTIMODAL', 'LLM'],
+                'adaptive': ['LLM'],
+                'asr': ['ASR', 'LLM'],
+                'embeddings': ['EMBEDDING', 'LLM'],
+                'completion': ['COMPLETION', 'LLM'],
+                'universal': ['LLM']
+            }
+            profiles = profile_map.get(client_type or 'adaptive', ['LLM'])
+            for prefix in profiles:
+                endpoint = os.getenv(f"{prefix}_ENDPOINT")
+                model = os.getenv(f"{prefix}_MODEL")
+                token = os.getenv(f"{prefix}_TOKEN") or os.getenv(f"{prefix}_API_KEY") or os.getenv(f"{prefix}_KEY")
+                if endpoint and model:
+                    cfg_kwargs = {
+                        **base_kwargs_local,
+                        'endpoint': endpoint,
+                        'model': model,
+                    }
+                    if token:
+                        cfg_kwargs['api_key'] = token
+                    return LLMConfig(**cfg_kwargs)
+            return LLMConfig(**base_kwargs_local)
+
+        # Всегда создаем базовый клиент (используем профиль CHAT/LLM из .env, если есть)
+        std_cfg = _create_config_for_client_type('standard', base_kwargs)
+        self._clients['standard'] = StandardLLMClient(std_cfg)
+
+        # Создаем клиенты на основе конфигурации (подбираем профильные ENDPOINT/MODEL/TOKEN из .env)
         if UniversalCapability.STREAMING in self.universal_config.capabilities:
-            self._clients['streaming'] = StreamingLLMClient(self.config)
+            stream_cfg = _create_config_for_client_type('streaming', base_kwargs)
+            self._clients['streaming'] = StreamingLLMClient(stream_cfg)
 
         if UniversalCapability.STRUCTURED_OUTPUT in self.universal_config.capabilities:
-            self._clients['structured'] = StructuredLLMClient(self.config)
+            so_cfg = _create_config_for_client_type('structured', base_kwargs)
+            self._clients['structured'] = StructuredLLMClient(so_cfg)
 
         if (UniversalCapability.REASONING in self.universal_config.capabilities or
                 UniversalCapability.NATIVE_THINKING in self.universal_config.capabilities):
+            reason_cfg = _create_config_for_client_type('reasoning', base_kwargs)
             self._clients['reasoning'] = ReasoningLLMClient(
-                self.config,
+                reason_cfg,
                 self.universal_config.reasoning_config
             )
 
         if (UniversalCapability.MULTIMODAL in self.universal_config.capabilities or
             UniversalCapability.VISION in self.universal_config.capabilities or
                 UniversalCapability.AUDIO in self.universal_config.capabilities):
+            mm_cfg = _create_config_for_client_type('multimodal', base_kwargs)
             self._clients['multimodal'] = MultimodalLLMClient(
-                self.config,
+                mm_cfg,
                 self.universal_config.multimodal_config
             )
 
         if UniversalCapability.ADAPTIVE in self.universal_config.capabilities:
+            ad_cfg = _create_config_for_client_type('adaptive', base_kwargs)
             self._clients['adaptive'] = AdaptiveLLMClient(
-                self.config,
+                ad_cfg,
                 self.universal_config.adaptive_config
             )
 
         if (UniversalCapability.ASR in self.universal_config.capabilities or
             UniversalCapability.STT in self.universal_config.capabilities or
                 UniversalCapability.TTS in self.universal_config.capabilities):
+            asr_cfg = _create_config_for_client_type('asr', base_kwargs)
             self._clients['asr'] = ASRClient(
-                self.config,
+                asr_cfg,
                 self.universal_config.asr_config
             )
 
         if UniversalCapability.EMBEDDINGS in self.universal_config.capabilities:
-            self._clients['embeddings'] = EmbeddingsLLMClient(self.config)
+            emb_cfg = _create_config_for_client_type('embeddings', base_kwargs)
+            self._clients['embeddings'] = EmbeddingsLLMClient(emb_cfg)
 
         if UniversalCapability.COMPLETION_LEGACY in self.universal_config.capabilities:
-            self._clients['completion'] = CompletionLLMClient(self.config)
+            comp_cfg = _create_config_for_client_type('completion', base_kwargs)
+            self._clients['completion'] = CompletionLLMClient(comp_cfg)
 
         # Инициализируем все клиенты
         for client_name, client in self._clients.items():

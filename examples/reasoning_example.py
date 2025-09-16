@@ -11,9 +11,7 @@
 """
 
 import asyncio
-import json
 import os
-from typing import Dict, Any
 from dotenv import load_dotenv
 
 from kraken_llm.client.reasoning import ReasoningLLMClient, ReasoningConfig
@@ -22,9 +20,9 @@ from kraken_llm.config.settings import LLMConfig
 load_dotenv()
 
 common_config = LLMConfig(
-    endpoint=os.getenv("LLM_ENDPOINT"),
-    api_key=os.getenv("LLM_TOKEN"),
-    model=os.getenv("LLM_MODEL")
+    endpoint=os.getenv("LLM_REASONING_ENDPOINT"),
+    api_key=os.getenv("LLM_REASONING_TOKEN"),
+    model=os.getenv("LLM_REASONING_MODEL")
 )
 
 async def math_reasoning_example():
@@ -39,13 +37,13 @@ async def math_reasoning_example():
     )
 
     reasoning_config = ReasoningConfig(
-        enable_cot=True,
+        enable_cot=False,
         max_reasoning_steps=8,
         reasoning_temperature=0.1,
         extract_confidence=True
     )
     
-    client = ReasoningLLMClient(config, reasoning_config)
+    client = ReasoningLLMClient(common_config, reasoning_config)
     
     # Математическая задача
     task = """

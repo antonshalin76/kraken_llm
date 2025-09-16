@@ -174,6 +174,37 @@ class LLMConfig(BaseSettings):
         ),
     )
     
+    # Настройки рассуждений (загружаются из LLM_ переменных окружения при наличии)
+    reasoning_type: Optional[str] = Field(
+        default=None,
+        description="Тип рассуждений: 'prompt_based' или 'native_thinking' (LLM_REASONING_TYPE)",
+        examples=["prompt_based", "native_thinking"],
+    )
+    enable_cot: Optional[bool] = Field(
+        default=None,
+        description="Включить Chain of Thought (LLM_ENABLE_COT)",
+    )
+    max_reasoning_steps: Optional[int] = Field(
+        default=None,
+        description="Максимальное число шагов рассуждения (LLM_MAX_REASONING_STEPS)",
+    )
+    enable_thinking: Optional[bool] = Field(
+        default=None,
+        description="Явно включить native thinking режим, если поддерживается (LLM_ENABLE_THINKING)",
+    )
+    expose_thinking: Optional[bool] = Field(
+        default=None,
+        description="Показывать thinking блоки в ответе (LLM_EXPOSE_THINKING)",
+    )
+    thinking_max_tokens: Optional[int] = Field(
+        default=None,
+        description="Лимит токенов для thinking блоков (LLM_MAX_THINKING_TOKENS)",
+    )
+    thinking_temperature: Optional[float] = Field(
+        default=None,
+        description="Температура для thinking блока (LLM_THINKING_TEMPERATURE)",
+    )
+    
     # Конфигурация OpenAI API
     api_mode: str = Field(
         default=DEFAULT_API_MODE,

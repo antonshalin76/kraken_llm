@@ -6,9 +6,7 @@
 пошаговое рассуждение и анализ логических цепочек.
 """
 
-import json
-import asyncio
-from typing import Dict, Any, List, Optional, Union, AsyncGenerator, Tuple
+from typing import Dict, Any, List, Optional, Union, AsyncGenerator
 from pydantic import BaseModel, Field
 from enum import Enum
 import logging
@@ -18,6 +16,18 @@ from ..exceptions.validation import ValidationError
 from ..exceptions.api import APIError
 
 logger = logging.getLogger(__name__)
+
+    
+def _bool_from_env(val: Optional[str]) -> Optional[bool]:
+    """Утилита для интерпретации булевых значений из окружения."""
+    if val is None:
+        return None
+    sval = str(val).strip().lower()
+    if sval in {"1", "true", "yes", "y", "on"}:
+        return True
+    if sval in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 class ReasoningModelType(str, Enum):
@@ -98,9 +108,59 @@ class ReasoningLLMClient(BaseLLMClient):
             reasoning_config: Конфигурация режима рассуждений
         """
         super().__init__(config)
+        # Берём либо переданную конфигурацию, либо создаём по умолчанию
         self.reasoning_config = reasoning_config or ReasoningConfig()
-        logger.info(f"Инициализирован ReasoningLLMClient (тип: {self.reasoning_config.model_type})")
+
+        # Применяем переопределения из LLMConfig/.env
+        self._apply_reasoning_overrides_from_llm_config()
+
+        # Автодетекция нативного thinking по имени модели/переменным окружения
+        try:
+            if (
+                self.reasoning_config.model_type == ReasoningModelType.PROMPT_BASED
+                and self._model_supports_thinking()
+                and (self.config.enable_thinking is not False)
+                and (self.reasoning_config.enable_thinking is not False)
+            ):
+                # Включаем native thinking режим автоматически
+                self.reasoning_config.model_type = ReasoningModelType.NATIVE_THINKING
+                logger.info("Авто-включен режим NATIVE_THINKING на основании модели/окружения")
+        except Exception as _:
+            # Не мешаем инициализации при ошибке детекции
+            pass
+
+        logger.info(
+            f"Инициализирован ReasoningLLMClient (тип: {self.reasoning_config.model_type})"
+        )
     
+    def _apply_reasoning_overrides_from_llm_config(self) -> None:
+        """Применяет переопределения ReasoningConfig из LLMConfig/.env при наличии."""
+        try:
+            # Тип рассуждений
+            if self.config.reasoning_type:
+                rt = str(self.config.reasoning_type).lower().replace("-", "_")
+                if rt in {"native_thinking", "native"}:
+                    self.reasoning_config.model_type = ReasoningModelType.NATIVE_THINKING
+                elif rt in {"prompt_based", "prompt"}:
+                    self.reasoning_config.model_type = ReasoningModelType.PROMPT_BASED
+
+            # Простые флаги/параметры
+            if self.config.enable_cot is not None:
+                self.reasoning_config.enable_cot = bool(self.config.enable_cot)
+            if self.config.max_reasoning_steps is not None:
+                self.reasoning_config.max_reasoning_steps = int(self.config.max_reasoning_steps)
+            if self.config.expose_thinking is not None:
+                self.reasoning_config.expose_thinking = bool(self.config.expose_thinking)
+            if self.config.enable_thinking is not None:
+                self.reasoning_config.enable_thinking = bool(self.config.enable_thinking)
+            if self.config.thinking_max_tokens is not None:
+                self.reasoning_config.thinking_max_tokens = int(self.config.thinking_max_tokens)
+            if self.config.thinking_temperature is not None:
+                self.reasoning_config.thinking_temperature = float(self.config.thinking_temperature)
+        except Exception as e:
+            logger.debug(f"Не удалось применить переопределения ReasoningConfig: {e}")
+
+
     def reasoning_completion(
         self,
         messages: List[Dict[str, str]],
@@ -124,7 +184,19 @@ class ReasoningLLMClient(BaseLLMClient):
         Returns:
             ReasoningChain или AsyncGenerator для streaming режима
         """
-        logger.info(f"Начинаем reasoning completion для типа задачи: {problem_type} (модель: {self.reasoning_config.model_type})")
+        logger.info(
+            f"Начинаем reasoning completion для типа задачи: {problem_type} (модель: {self.reasoning_config.model_type})"
+        )
+
+        # Автопереключение на native thinking, если поддерживается
+        if (
+            self.reasoning_config.model_type == ReasoningModelType.PROMPT_BASED
+            and self._model_supports_thinking()
+            and (self.config.enable_thinking is not False)
+            and (self.reasoning_config.enable_thinking is not False)
+        ):
+            self.reasoning_config.model_type = ReasoningModelType.NATIVE_THINKING
+            logger.info("Переключение на режим NATIVE_THINKING (обнаружена поддержка модели)")
         
         if self.reasoning_config.model_type == ReasoningModelType.NATIVE_THINKING:
             # Используем нативный thinking режим
@@ -923,46 +995,53 @@ class ReasoningLLMClient(BaseLLMClient):
         """
         Подготавливает параметры для нативной рассуждающей модели.
         
-        Примечание: Текущие OpenAI модели не поддерживают thinking параметры.
-        Этот метод готов к будущим нативным рассуждающим моделям.
-        
-        Args:
-            messages: Сообщения
-            stream: Потоковый режим
-            **kwargs: Дополнительные параметры
-            
-        Returns:
-            Параметры для API вызова
+        Для некоторых провайдеров (например, Qwen Thinking) достаточно обычного
+        chat.completions вызова — модель вернёт внутренние размышления в виде токенов.
+        Если провайдер требует спец.параметров (enable_thinking и т.п.), их нужно
+        передавать через extra_body, поскольку AsyncOpenAI имеет типизированную
+        сигнатуру и игнорирует неизвестные именованные аргументы.
         """
+        # Параметры, поддерживаемые SDK непосредственно
+        supported_keys = {
+            "model", "messages", "temperature", "top_p", "n", "stream", "stop",
+            "max_tokens", "presence_penalty", "frequency_penalty", "logit_bias",
+            "user", "response_format", "tools", "tool_choice", "functions",
+            "function_call", "seed"
+        }
+
         # Базовые параметры
-        params = {
+        params: Dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "temperature": self.reasoning_config.reasoning_temperature,
-            "stream": stream
+            "stream": stream,
         }
-        
-        # Проверяем поддержку thinking параметров моделью
-        model_supports_thinking = self._model_supports_thinking()
-        
-        # Параметры thinking режима (только для реально поддерживающих API)
-        # Пока что большинство API не поддерживают эти параметры, поэтому комментируем
-        # В будущем можно будет раскомментировать для реальных thinking API
-        
-        # if self.reasoning_config.enable_thinking and model_supports_thinking:
-        #     params["enable_thinking"] = True
-        #     
-        #     if self.reasoning_config.thinking_max_tokens:
-        #         params["thinking_max_tokens"] = self.reasoning_config.thinking_max_tokens
-        #     
-        #     if self.reasoning_config.thinking_temperature is not None:
-        #         params["thinking_temperature"] = self.reasoning_config.thinking_temperature
-        #     
-        #     if not self.reasoning_config.expose_thinking:
-        #         params["expose_thinking"] = False
-        
-        # Дополнительные параметры
-        params.update({k: v for k, v in kwargs.items() if k not in params})
+
+        # Собираем provider-specific thinking флаги в extra_body
+        extra_body: Dict[str, Any] = {}
+        if self.reasoning_config.enable_thinking or (self.config.enable_thinking is True):
+            for key, val in {
+                "enable_thinking": True,
+                "expose_thinking": self.reasoning_config.expose_thinking,
+                "thinking_max_tokens": self.reasoning_config.thinking_max_tokens,
+                "thinking_temperature": self.reasoning_config.thinking_temperature,
+            }.items():
+                if val is not None:
+                    extra_body[key] = val
+
+        # Разносим дополнительные kwargs: известные в params, остальные в extra_body
+        for k, v in kwargs.items():
+            if k in supported_keys:
+                params[k] = v
+            else:
+                extra_body[k] = v
+
+        # Прикрепляем extra_body, если там есть поля
+        if extra_body:
+            params["extra_body"] = extra_body
+
+        # Удаляем None-значения из верхнего уровня
+        params = {k: v for k, v in params.items() if v is not None}
         
         return params
     
@@ -973,50 +1052,44 @@ class ReasoningLLMClient(BaseLLMClient):
         Returns:
             True если модель поддерживает thinking режим
         """
-        # Список моделей с поддержкой thinking
+        import os
+
+        model_name = (self.config.model or "").lower()
+
+        # Явное указание через окружение имеет приоритет
+        if (self.config.reasoning_type and str(self.config.reasoning_type).lower() in {"native_thinking", "native-thinking", "native"}) or \
+           (os.getenv("LLM_REASONING_TYPE", "").lower() in {"native_thinking", "native-thinking", "native"}):
+            return True
+
+        # Эвристика по названию модели
+        if ("thinking" in model_name or "reasoning" in model_name or "o1" in model_name or "r1" in model_name) and \
+           ("qwen" in model_name or "deepseek" in model_name or "openai" in model_name or "anthropic" in model_name or "gemini" in model_name or True):
+            return True
+
+        # Поддержка конкретных часто встречающихся вариантов
         thinking_models = [
             # OpenAI reasoning models
             "o1-preview",
             "o1-mini",
             "o1-pro",
-            
-            # Qwen thinking models
+
+            # Qwen (включая вариации с суффиксами версий)
             "qwen3-4b-thinking",
-            "qwen3-thinking",
-            "qwen-thinking",
+            "qwen3-7b-thinking",
+            "qwen2.5-thinking",
             "qwen2-thinking",
-            
-            # Claude reasoning models (гипотетические)
-            "claude-reasoning",
-            "claude-thinking",
-            "anthropic-reasoning",
-            
-            # Gemini thinking models (гипотетические)
-            "gemini-thinking",
-            "gemini-reasoning",
-            "bard-thinking",
-            
-            # Meta reasoning models (гипотетические)
-            "llama-reasoning",
-            "llama-thinking",
-            "meta-reasoning",
-            
-            # Mistral reasoning models (гипотетические)
-            "mistral-reasoning",
-            "mistral-thinking",
-            "mixtral-reasoning",
-            
-            # Generic thinking/reasoning models
-            "thinking-model",
-            "reasoning-model",
-            "think-model",
-            "reason-model",
-            "cot-model",
-            "reflection-model"
+            "qwen-thinking",
+
+            # DeepSeek (R1 series)
+            "deepseek-r1",
+            "deepseek-reasoner",
+
+            # Generic
+            "thinking-",
+            "-thinking",
+            "reasoner",
         ]
-        
-        model_name = self.config.model.lower()
-        return any(thinking_model in model_name for thinking_model in thinking_models)
+        return any(pat in model_name for pat in thinking_models)
     
     def _get_thinking_tokens(self) -> tuple[str, str]:
         """

@@ -5,8 +5,9 @@
 LLM клиентов с автоматическим выбором подходящего клиента на основе параметров.
 """
 
-from typing import Optional, Type, Union, Dict, Any
+from typing import Optional, Type, Dict, Any, List
 import logging
+import os
 
 from ..config.settings import LLMConfig
 from .base import BaseLLMClient
@@ -58,7 +59,7 @@ class ClientFactory:
 
         Args:
             client_type: Тип клиента ('standard', 'streaming', 'structured', etc.)
-            config: Конфигурация клиента (если не указана, используется по умолчанию)
+            config: Конфигурация клиента (если не указана, берётся из .env по профилю клиента)
             **kwargs: Дополнительные параметры для конфигурации
 
         Returns:
@@ -82,14 +83,18 @@ class ClientFactory:
             ...     temperature=0.7
             ... )
         """
-        # Создаем конфигурацию если не передана
+        # Создаем конфигурацию если не передана: подбираем по типу клиента из .env
+        # Выделяем специализированные конфиги, чтобы не попадали в LLMConfig
+        reasoning_cfg = kwargs.pop('reasoning_config', None)
+
         if config is None:
-            config = LLMConfig(**kwargs)
+            resolved_type = client_type or cls._auto_detect_client_type(LLMConfig(**kwargs), **kwargs)
+            config = cls._create_config_for_client_type(resolved_type, kwargs)
         else:
             # Обновляем конфигурацию переданными параметрами
             if kwargs:
                 config_dict = config.model_dump()
-                config_dict.update(kwargs)
+                config_dict.update({k: v for k, v in kwargs.items() if k not in {'reasoning_config'}})
                 config = LLMConfig(**config_dict)
 
         # Автоматический выбор типа клиента если не указан
@@ -110,6 +115,8 @@ class ClientFactory:
             f"Создание клиента типа {client_type} с endpoint: {config.endpoint}")
 
         # Создаем и возвращаем клиент
+        if client_class is ReasoningLLMClient:
+            return client_class(config, reasoning_cfg)
         return client_class(config)
 
     @classmethod
@@ -299,8 +306,66 @@ class ClientFactory:
             client_class: Класс клиента
 
         Raises:
+            ValueError: Если тип уже зарегистрирован
             ValueError: Если класс не наследуется от BaseLLMClient
         """
+        if name in cls._client_registry:
+            raise ValueError(f"Тип клиента '{name}' уже зарегистрирован")
+
+        if not issubclass(client_class, BaseLLMClient):
+            raise ValueError(
+                f"Класс клиента должен наследоваться от BaseLLMClient, "
+                f"получен: {client_class}"
+            )
+
+        cls._client_registry[name] = client_class
+        logger.info(f"Зарегистрирован новый тип клиента: {name}")
+
+    # Вспомогательные методы
+    @classmethod
+    def _create_config_for_client_type(cls, client_type: str, base_kwargs: Dict[str, Any]) -> LLMConfig:
+        """
+        Создаёт LLMConfig, подбирая переменные окружения под конкретный тип клиента.
+        Предпочитает профильные префиксы (например, EMBEDDING_*, LLM_REASONING_*),
+        а затем падает обратно на универсальные LLM_*.
+        """
+        # Маппинг профилей по типу клиента (в порядке приоритета)
+        profile_map: Dict[str, List[str]] = {
+            'standard': ['CHAT', 'LLM'],
+            'streaming': ['CHAT', 'LLM'],
+            'structured': ['CHAT', 'LLM'],
+            'reasoning': ['LLM_REASONING', 'REASONING', 'LLM'],
+            'multimodal': ['MULTIMODAL', 'LLM'],
+            'adaptive': ['LLM'],
+            'asr': ['ASR', 'LLM'],
+            'embeddings': ['EMBEDDING', 'LLM'],
+            'completion': ['COMPLETION', 'LLM'],
+            'universal': ['LLM']
+        }
+
+        profiles = profile_map.get(client_type or 'adaptive', ['LLM'])
+
+        # Попробуем собрать endpoint/token/model по профилям
+        for prefix in profiles:
+            endpoint = os.getenv(f"{prefix}_ENDPOINT")
+            model = os.getenv(f"{prefix}_MODEL")
+            # Токен может называться по-разному
+            token = os.getenv(f"{prefix}_TOKEN") or os.getenv(f"{prefix}_API_KEY") or os.getenv(f"{prefix}_KEY")
+
+            if endpoint and model:
+                # Собираем kwargs для LLMConfig
+                cfg_kwargs = {
+                    **base_kwargs,
+                    'endpoint': endpoint,
+                    'model': model,
+                }
+                if token:
+                    # LLMConfig примет api_key
+                    cfg_kwargs['api_key'] = token
+                return LLMConfig(**cfg_kwargs)
+
+        # Ничего профильного не нашли — используем универсальную конфигурацию
+        return LLMConfig(**base_kwargs)
         if not issubclass(client_class, BaseLLMClient):
             raise ValueError(
                 f"Класс клиента должен наследоваться от BaseLLMClient, "

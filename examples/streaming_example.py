@@ -10,13 +10,16 @@ import os
 import time
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from dotenv import load_dotenv
 
-# Настройка переменных окружения
-os.environ["LLM_ENDPOINT"] = "http://10.129.0.37:8082"
-os.environ["LLM_TOKEN"] = "auth_7313ff09b5b24e529786c48f1bfc068c"
-os.environ["LLM_MODEL"] = "chat"
+load_dotenv()
 
-
+# Создаем конфигурацию
+config = LLMConfig(
+    endpoint=os.getenv("LLM_ENDPOINT"),
+    api_key=os.getenv("LLM_TOKEN"),
+    model=os.getenv("LLM_MODEL")
+)
 class Person(BaseModel):
     """Простая модель человека"""
     name: str = Field(..., description="Имя")
@@ -45,7 +48,6 @@ async def demo_simple_streaming():
     print("\n1️⃣  Простой streaming с базовой моделью")
     print("-" * 40)
 
-    config = LLMConfig()
     config.outlines_so_mode = True
 
     client = StructuredLLMClient(config)
@@ -91,7 +93,6 @@ async def demo_complex_streaming():
     print("\n2️⃣  Сложный streaming с детальной моделью")
     print("-" * 40)
 
-    config = LLMConfig()
     config.outlines_so_mode = True
 
     client = StructuredLLMClient(config)
@@ -144,7 +145,6 @@ async def demo_performance_comparison():
     print("\n3️⃣  Сравнение производительности")
     print("-" * 40)
 
-    config = LLMConfig()
     config.outlines_so_mode = True
 
     client = StructuredLLMClient(config)
@@ -224,7 +224,6 @@ async def demo_concurrent_streaming():
     print("\n4️⃣  Параллельный streaming")
     print("-" * 40)
 
-    config = LLMConfig()
     config.outlines_so_mode = True
 
     client = StructuredLLMClient(config)
