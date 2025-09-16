@@ -1,4 +1,4 @@
-name: Build and Publish Python Package on Any Push
+name: Build and Publish Python Package with Post Version Increment
 
 on:
   push:
@@ -13,29 +13,33 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Get short commit count
-        id: get_commit_count
+      - name: Count commits for current version
+        id: count_commits
         run: |
+          VERSION_BASE="0.1.2"
           COUNT=$(git rev-list --count HEAD)
-          echo "COUNT=$COUNT" >> $GITHUB_ENV
+          # Формируем постфикс версии с подсчётом
+          NEW_VERSION="${VERSION_BASE}post${COUNT}"
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
       - name: Update version in pyproject.toml
-        run: |
-          sed -i "s|^version = .*|version = \"0.1.1.post${COUNT}\"|" pyproject.toml
+        run: sed -i "s|^version = .*|version = \"$NEW_VERSION\"|" pyproject.toml
 
-      - name: Install build tools
-        run: python -m pip install --upgrade build
+      - name: Clean dist folder
+        run: rm -rf dist/*
+
+      - name: Install build system
+        run: python3 -m pip install --upgrade build hatchling
 
       - name: Build distribution
-        run: python -m build
+        run: python3 -m build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
