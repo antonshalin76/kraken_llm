@@ -39,6 +39,10 @@ from .defaults import (
     DEFAULT_COMPLETIONS_PATH,
     DEFAULT_EMBEDDINGS_PATH,
     DEFAULT_MODELS_PATH,
+    DEFAULT_LOGPROBS,
+    DEFAULT_TOP_LOGPROBS,
+    DEFAULT_FORCE_OPENAI_STREAMING,
+    DEFAULT_SUPPRESS_STREAM_WARNINGS,
 )
 
 
@@ -171,6 +175,40 @@ class LLMConfig(BaseSettings):
             "Включить режим структурированного вывода Outlines. Когда True, использует библиотеку Outlines "
             "для генерации структурированного вывода. Когда False, использует нативный response_format OpenAI. "
             "Outlines обеспечивает лучшее соответствие схеме, но может быть медленнее."
+        ),
+    )
+
+    # Глобальные флаги потокового поведения
+    force_openai_streaming: bool = Field(
+        default=DEFAULT_FORCE_OPENAI_STREAMING,
+        description=(
+            "Всегда использовать нативный streaming AsyncOpenAI для chat.completions, даже если сервер "
+            "поддерживает non-stream ответы. Полезно для vLLM и сбора per-token logprobs."
+        ),
+    )
+
+    suppress_stream_warnings: bool = Field(
+        default=DEFAULT_SUPPRESS_STREAM_WARNINGS,
+        description=(
+            "Подавлять предупреждения о прерывании потоков (incomplete chunked read и т.п.) и логировать их на DEBUG."
+        ),
+    )
+
+    # LogProbs/Confidence
+    logprobs: Optional[bool] = Field(
+        default=DEFAULT_LOGPROBS,
+        description=(
+            "Возвращать logprobs для chat completions (если поддерживается провайдером). "
+            "Для streaming/chunk режимов logprobs приходят в каждом chunk."
+        ),
+    )
+    top_logprobs: Optional[int] = Field(
+        default=DEFAULT_TOP_LOGPROBS,
+        ge=1,
+        le=5,
+        description=(
+            "Количество топ-альтернатив с logprobs для каждого токена (1-5) в chat completions. "
+            "Для legacy completions API этот параметр передается как logprobs=<int>."
         ),
     )
     
@@ -364,6 +402,12 @@ class LLMConfig(BaseSettings):
             **self.generation_params,
             **overrides,
         }
+
+        # Прокидываем настройки logprobs, если они заданы
+        if self.logprobs is not None and "logprobs" not in params:
+            params["logprobs"] = self.logprobs
+        if self.top_logprobs is not None and "top_logprobs" not in params:
+            params["top_logprobs"] = self.top_logprobs
         
         # Удаляем None значения
         return {k: v for k, v in params.items() if v is not None}

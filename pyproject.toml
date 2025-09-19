@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kraken_llm"
-version = "0.1.2"
+version = "0.1.3"
 description = "Universal LLM framework with full OpenAI API support"
-readme = "README.md"
-license = "MIT"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { file = "LICENSE" }
 authors = [
     {name = "Anton Shalin", email = "anton.shalin@gmail.com"},
 ]
@@ -32,6 +32,9 @@ dependencies = [
     "pydantic-settings",
     "httpx",
     "Pillow",
+    "numpy",
+    "python-dotenv",
+    "typing-extensions"
 ]
 
 [project.optional-dependencies]
@@ -134,3 +137,10 @@ exclude_lines = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kraken_llm"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/kraken_llm",
+  "README.md",
+  "LICENSE"
+]

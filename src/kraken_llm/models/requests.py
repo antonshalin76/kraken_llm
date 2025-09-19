@@ -121,6 +121,10 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[ToolDefinition]] = Field(None, description="Список инструментов")
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Управление выбором инструментов")
     
+    # Logprobs
+    logprobs: Optional[bool] = Field(None, description="Возвращать logprobs (если поддерживается)")
+    top_logprobs: Optional[int] = Field(None, ge=1, le=5, description="Количество топ-альтернатив (1-5)")
+    
     # Дополнительные параметры
     seed: Optional[int] = Field(None, description="Seed для воспроизводимости")
     user: Optional[str] = Field(None, description="Идентификатор пользователя")
@@ -152,6 +156,17 @@ class ChatCompletionRequest(BaseModel):
         if field_name == 'functions' and v and data.get('tools'):
             raise ValueError("Нельзя использовать functions и tools одновременно")
         
+        return v
+
+    @field_validator('top_logprobs')
+    @classmethod
+    def validate_top_logprobs(cls, v, info):
+        """Ограничение значений top_logprobs для chat completions."""
+        if v is None:
+            return v
+        # Ограничим безопасным диапазоном 1..5
+        if not (1 <= v <= 5):
+            raise ValueError("top_logprobs должен быть в диапазоне 1..5")
         return v
 
 

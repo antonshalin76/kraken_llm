@@ -8,6 +8,7 @@
 
 import json
 import time
+import numpy as np
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
@@ -17,6 +18,7 @@ from .base import BaseLLMClient
 from ..exceptions.api import APIError
 from ..exceptions.validation import ValidationError
 from ..utils.logging import get_logger
+from ..confidence.metrics import confidence_from_chat_logprobs
 
 logger = get_logger(__name__)
 
@@ -61,8 +63,10 @@ class StandardLLMClient(BaseLLMClient):
         function_call: Optional[Union[str, Dict]] = None,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[Union[str, Dict]] = None,
+        include_confidence: Optional[bool] = None,
+        prefer_openai_streaming: Optional[bool] = None,
         **kwargs
-    ) -> str:
+    ) -> Union[str, Dict[str, Any]]:
         """
         Выполняет обычный chat completion запрос через AsyncOpenAI.
         
@@ -103,6 +107,16 @@ class StandardLLMClient(BaseLLMClient):
                 stream=False,  # Стандартный клиент не поддерживает streaming
                 **kwargs
             )
+
+            # Если просили confidence, убеждаемся что запрошены logprobs
+            if include_confidence:
+                params.setdefault("logprobs", True)
+                # Для chat логпробов желательно указать top_logprobs
+                if "top_logprobs" not in params:
+                    top_lp = kwargs.get("top_logprobs", getattr(self.config, "top_logprobs", None))
+                    if top_lp is None:
+                        top_lp = 5
+                    params["top_logprobs"] = top_lp
             
             # Добавление function calling параметров
             if functions:
@@ -118,18 +132,56 @@ class StandardLLMClient(BaseLLMClient):
             
             logger.debug(f"Параметры запроса: {list(params.keys())}")
             
+            # Эффективное предпочтение нативного стрима: параметр или глобальная настройка
+            prefer_stream_effective = bool(
+                (prefer_openai_streaming is True) or getattr(self.config, "force_openai_streaming", False)
+            )
+
+            if prefer_stream_effective:
+                return await self._chat_completion_via_openai_stream(
+                    params, messages, include_confidence=include_confidence
+                )
+
             # Проверяем, поддерживает ли сервер обычные (не streaming) запросы
             if await self._server_supports_non_streaming():
+                # Гарантируем, что в non-stream ветке параметр stream выключен (не переопределен kwargs)
+                params["stream"] = False
                 # Выполнение запроса через AsyncOpenAI
                 response: ChatCompletion = await self.openai_client.chat.completions.create(**params)
                 
                 logger.debug(f"Получен ответ от API: {response.id}")
                 
                 # Обработка ответа
-                return await self._process_chat_completion_response(response, messages)
+                if include_confidence:
+                    # Извлекаем текст и метрики уверенности
+                    if not response.choices:
+                        raise APIError(
+                            message="Ответ API не содержит choices",
+                            status_code=500,
+                            response_data={"response_id": response.id}
+                        )
+                    choice = response.choices[0]
+                    message = choice.message
+                    text = message.content or ""
+                    metrics = confidence_from_chat_logprobs(getattr(choice, "logprobs", None))
+                    return {
+                        "text": text,
+                        "confidence": metrics.get("average_confidence", 0.0),
+                        "confidence_label": metrics.get("confidence_label", ""),
+                        "confidence_metrics": metrics,
+                    }
+                else:
+                    return await self._process_chat_completion_response(response, messages)
             else:
-                # Сервер поддерживает только streaming, используем прямой HTTP запрос
-                return await self._chat_completion_via_streaming(params, messages)
+                # Сервер поддерживает только streaming
+                if prefer_openai_streaming:
+                    return await self._chat_completion_via_openai_stream(
+                        params, messages, include_confidence=include_confidence
+                    )
+                # По умолчанию используем прямой HTTP запрос (SSE)
+                return await self._chat_completion_via_streaming(
+                    params, messages, include_confidence=include_confidence
+                )
             
         except Exception as e:
             logger.error(f"Ошибка в chat_completion: {e}")
@@ -181,8 +233,9 @@ class StandardLLMClient(BaseLLMClient):
     async def _chat_completion_via_streaming(
         self, 
         params: Dict[str, Any], 
-        original_messages: List[Dict[str, str]]
-    ) -> str:
+        original_messages: List[Dict[str, str]],
+        include_confidence: Optional[bool] = None,
+    ) -> Union[str, Dict[str, Any]]:
         """
         Выполняет chat completion через streaming и агрегирует результат.
         
@@ -193,12 +246,13 @@ class StandardLLMClient(BaseLLMClient):
         
         headers = {
             "Authorization": f"Bearer {self.config.api_key or 'dummy'}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
         }
         
-        # Убираем stream параметр, так как сервер всегда возвращает streaming
+        # Явно включаем stream для совместимости с SSE‑серверами
         streaming_params = params.copy()
-        streaming_params.pop("stream", None)
+        streaming_params["stream"] = True
         
         logger.debug("Выполняем запрос через streaming агрегацию")
         
@@ -224,71 +278,311 @@ class StandardLLMClient(BaseLLMClient):
                 content = ""
                 function_call = None
                 tool_calls = []
+                # Коллекция метрик уверенности для SSE режима (если сервер их отдает)
+                all_confidences: List[float] = [] if include_confidence else []
+                token_confidences: List[Dict[str, Any]] = [] if include_confidence else []
                 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    
-                    data_str = line[6:]  # Убираем "data: "
-                    if data_str.strip() == "[DONE]":
-                        break
-                    
-                    try:
-                        chunk = json.loads(data_str)
+                try:
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
                         
-                        if "choices" in chunk and chunk["choices"]:
-                            choice = chunk["choices"][0]
-                            delta = choice.get("delta", {})
+                        data_str = line[6:]  # Убираем "data: "
+                        if data_str.strip() == "[DONE]":
+                            break
+                        
+                        try:
+                            chunk = json.loads(data_str)
                             
-                            # Агрегируем контент
-                            if "content" in delta and delta["content"]:
-                                content += delta["content"]
-                            
-                            # Обрабатываем function calls
-                            if "function_call" in delta and delta["function_call"]:
-                                if function_call is None:
-                                    function_call = {"name": "", "arguments": ""}
+                            if "choices" in chunk and chunk["choices"]:
+                                choice = chunk["choices"][0]
+                                delta = choice.get("delta", {})
                                 
-                                fc = delta["function_call"]
-                                if "name" in fc:
-                                    function_call["name"] += fc["name"]
-                                if "arguments" in fc:
-                                    function_call["arguments"] += fc["arguments"]
-                            
-                            # Обрабатываем tool calls
-                            if "tool_calls" in delta and delta["tool_calls"]:
-                                for tool_call in delta["tool_calls"]:
-                                    # Расширяем список tool_calls при необходимости
-                                    while len(tool_calls) <= tool_call.get("index", 0):
-                                        tool_calls.append({
-                                            "id": "",
-                                            "type": "function",
-                                            "function": {"name": "", "arguments": ""}
-                                        })
+                                # Агрегируем контент
+                                if "content" in delta and delta["content"]:
+                                    content += delta["content"]
+                                
+                                # Обрабатываем function calls
+                                if "function_call" in delta and delta["function_call"]:
+                                    if function_call is None:
+                                        function_call = {"name": "", "arguments": ""}
                                     
-                                    idx = tool_call.get("index", 0)
-                                    if "id" in tool_call:
-                                        tool_calls[idx]["id"] += tool_call["id"]
-                                    if "function" in tool_call:
-                                        func = tool_call["function"]
-                                        if "name" in func:
-                                            tool_calls[idx]["function"]["name"] += func["name"]
-                                        if "arguments" in func:
-                                            tool_calls[idx]["function"]["arguments"] += func["arguments"]
-                    
-                    except json.JSONDecodeError:
-                        continue
+                                    fc = delta["function_call"]
+                                    if "name" in fc:
+                                        function_call["name"] += fc["name"]
+                                    if "arguments" in fc:
+                                        function_call["arguments"] += fc["arguments"]
+                                
+                                # Обрабатываем tool calls
+                                if "tool_calls" in delta and delta["tool_calls"]:
+                                    for tool_call in delta["tool_calls"]:
+                                        # Расширяем список tool_calls при необходимости
+                                        while len(tool_calls) <= tool_call.get("index", 0):
+                                            tool_calls.append({
+                                                "id": "",
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""}
+                                            })
+                                        
+                                        idx = tool_call.get("index", 0)
+                                        if "id" in tool_call:
+                                            tool_calls[idx]["id"] += tool_call["id"]
+                                        if "function" in tool_call:
+                                            func = tool_call["function"]
+                                            if "name" in func:
+                                                tool_calls[idx]["function"]["name"] += func["name"]
+                                            if "arguments" in func:
+                                                tool_calls[idx]["function"]["arguments"] += func["arguments"]
+                                
+                                # Извлекаем logprobs из SSE чанка, если сервер их отдает в choices[0].logprobs
+                                if include_confidence and isinstance(choice.get("logprobs"), dict):
+                                    lp = choice.get("logprobs", {})
+                                    contents = lp.get("content") or []
+                                    if isinstance(contents, list):
+                                        for item in contents:
+                                            lp_val = item.get("logprob") if isinstance(item, dict) else None
+                                            if lp_val is not None:
+                                                try:
+                                                    p = float(np.exp(lp_val))
+                                                except Exception:
+                                                    p = 0.0
+                                                all_confidences.append(p)
+                                                # Альтернативы (top_logprobs)
+                                                alts = []
+                                                top = item.get("top_logprobs", []) if isinstance(item, dict) else []
+                                                if isinstance(top, list):
+                                                    for alt in top:
+                                                        if isinstance(alt, dict) and "logprob" in alt:
+                                                            try:
+                                                                alt_p = float(np.exp(alt["logprob"]))
+                                                            except Exception:
+                                                                alt_p = 0.0
+                                                            alts.append({
+                                                                "token": alt.get("token", ""),
+                                                                "confidence": alt_p,
+                                                                "logprob": alt["logprob"],
+                                                            })
+                                                token_confidences.append({
+                                                    "token": item.get("token", "") if isinstance(item, dict) else "",
+                                                    "confidence": p,
+                                                    "confidence_label": "",  # добавим позже
+                                                    "logprob": lp_val,
+                                                    "alternatives": alts,
+                                                })
+                        
+                        except json.JSONDecodeError:
+                            continue
+                except Exception as stream_err:
+                    # Сервер разорвал соединение/частичная передача — возвращаем имеющееся содержимое
+                    if getattr(self.config, "suppress_stream_warnings", False):
+                        logger.debug(f"Поток завершён с ошибкой: {stream_err}; возвращаем накопленный контент")
+                    else:
+                        logger.warning(f"Поток завершён с ошибкой: {stream_err}; возвращаем накопленный контент")
+                
                 
                 # Обрабатываем результат
                 if function_call and function_call["name"]:
                     # Выполняем function call
-                    return await self._handle_function_call(function_call, original_messages)
+                    result = await self._handle_function_call(function_call, original_messages)
+                    if include_confidence:
+                        # Для function/tool call метрики confidence не применимы к тексту
+                        return {"text": result, "confidence": 0.0, "confidence_label": "", "confidence_metrics": {}}
+                    return result
                 elif tool_calls:
                     # Выполняем tool calls
-                    return await self._handle_tool_calls(tool_calls, original_messages)
+                    result = await self._handle_tool_calls(tool_calls, original_messages)
+                    if include_confidence:
+                        return {"text": result, "confidence": 0.0, "confidence_label": "", "confidence_metrics": {}}
+                    return result
                 else:
                     # Возвращаем обычный контент
+                    if include_confidence:
+                        if all_confidences:
+                            avg = float(np.mean(all_confidences))
+                            # Добавляем label для собранных токенов
+                            for t in token_confidences:
+                                t["confidence_label"] = (
+                                    "Очень высокая" if t["confidence"] >= 0.9 else
+                                    "Высокая" if t["confidence"] >= 0.7 else
+                                    "Средняя" if t["confidence"] >= 0.5 else
+                                    "Низкая" if t["confidence"] >= 0.3 else
+                                    "Очень низкая"
+                                )
+                            return {
+                                "text": content.strip(),
+                                "confidence": avg,
+                                "confidence_label": (
+                                    "Очень высокая" if avg >= 0.9 else
+                                    "Высокая" if avg >= 0.7 else
+                                    "Средняя" if avg >= 0.5 else
+                                    "Низкая" if avg >= 0.3 else
+                                    "Очень низкая"
+                                ),
+                                "token_confidences": token_confidences,
+                                "total_tokens": len(token_confidences),
+                            }
+                        # Если есть текст, но нет метрик — возвращаем текст без logprobs
+                        if content.strip():
+                            return {
+                                "text": content.strip(),
+                                "confidence": 0.5,
+                                "confidence_label": "Нет logprobs",
+                                "token_confidences": [],
+                                "total_tokens": 0,
+                            }
+                        # Полный fallback: пробуем non-stream запрос через AsyncOpenAI
+                        try:
+                            ns_params = params.copy()
+                            ns_params["stream"] = False
+                            ns_params.setdefault("logprobs", True)
+                            if "top_logprobs" not in ns_params:
+                                ns_params["top_logprobs"] = 5
+                            response_ns = await self.openai_client.chat.completions.create(**ns_params)
+                            if not response_ns.choices:
+                                return {"text": "", "confidence": 0.0, "confidence_label": "Ошибка"}
+                            choice_ns = response_ns.choices[0]
+                            text_ns = (choice_ns.message.content or "").strip()
+                            from ..confidence.metrics import confidence_from_chat_logprobs
+                            metrics_ns = confidence_from_chat_logprobs(getattr(choice_ns, "logprobs", None))
+                            return {
+                                "text": text_ns,
+                                "confidence": metrics_ns.get("average_confidence", 0.5),
+                                "confidence_label": metrics_ns.get("confidence_label", "Нет logprobs"),
+                                "confidence_metrics": metrics_ns,
+                            }
+                        except Exception:
+                            return {
+                                "text": content.strip(),
+                                "confidence": 0.5,
+                                "confidence_label": "Нет logprobs",
+                                "token_confidences": [],
+                                "total_tokens": 0,
+                            }
                     return content.strip()
+    async def _chat_completion_via_openai_stream(
+        self,
+        params: Dict[str, Any],
+        original_messages: List[Dict[str, str]],
+        include_confidence: Optional[bool] = None,
+    ) -> Union[str, Dict[str, Any]]:
+        """
+        Потоковый запрос через AsyncOpenAI (stream=True) с агрегацией результата.
+        Используется как альтернатива прямому HTTP SSE фоллбеку (например, для vLLM).
+        """
+        # Включаем stream
+        oa_params = params.copy()
+        oa_params["stream"] = True
+        stream = await self.openai_client.chat.completions.create(**oa_params)
+
+        content = ""
+        if include_confidence:
+            all_confidences: List[float] = []
+            token_confidences: List[Dict[str, Any]] = []
+        
+        try:
+            async for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    ch = chunk.choices[0]
+                    if ch.delta and ch.delta.content:
+                        content += ch.delta.content
+                    if include_confidence and getattr(ch, "logprobs", None) and getattr(ch.logprobs, "content", None):
+                        for item in ch.logprobs.content:
+                            # item: ChatCompletionTokenLogprob
+                            lp = getattr(item, "logprob", None)
+                            if lp is not None:
+                                p = float(np.exp(lp))
+                                all_confidences.append(p)
+                                # Альтернативы
+                                alts = []
+                                for alt in getattr(item, "top_logprobs", []) or []:
+                                    alt_lp = getattr(alt, "logprob", None)
+                                    if alt_lp is not None:
+                                        alts.append(
+                                            {
+                                                "token": getattr(alt, "token", "") or "",
+                                                "confidence": float(np.exp(alt_lp)),
+                                                "logprob": alt_lp,
+                                            }
+                                        )
+                                token_confidences.append(
+                                    {
+                                        "token": getattr(item, "token", "") or "",
+                                        "confidence": p,
+                                        "confidence_label": "",  # добавим позже
+                                        "logprob": lp,
+                                        "alternatives": alts,
+                                    }
+                                )
+        except Exception as stream_err:
+            # Поток оборвался — продолжаем с тем, что накопили; если совсем пусто, пробуем non-stream fallback
+            if getattr(self.config, "suppress_stream_warnings", False):
+                logger.debug(f"Поток OpenAI прерван: {stream_err}; возвращаем накопленный контент или пробуем non-stream")
+            else:
+                logger.warning(f"Поток OpenAI прерван: {stream_err}; возвращаем накопленный контент или пробуем non-stream")
+        
+        if include_confidence:
+            if all_confidences:
+                avg = float(np.mean(all_confidences))
+                # Проставляем метки
+                for t in token_confidences:
+                    t["confidence_label"] = (
+                        "Очень высокая" if t["confidence"] >= 0.9 else
+                        "Высокая" if t["confidence"] >= 0.7 else
+                        "Средняя" if t["confidence"] >= 0.5 else
+                        "Низкая" if t["confidence"] >= 0.3 else
+                        "Очень низкая"
+                    )
+                return {
+                    "text": content.strip(),
+                    "confidence": avg,
+                    "confidence_label": (
+                        "Очень высокая" if avg >= 0.9 else
+                        "Высокая" if avg >= 0.7 else
+                        "Средняя" if avg >= 0.5 else
+                        "Низкая" if avg >= 0.3 else
+                        "Очень низкая"
+                    ),
+                    "token_confidences": token_confidences,
+                    "total_tokens": len(token_confidences),
+                }
+            # Если токенных метрик нет, но есть текст — возвращаем текст с пометкой
+            if content.strip():
+                return {
+                    "text": content.strip(),
+                    "confidence": 0.5,
+                    "confidence_label": "Нет logprobs",
+                    "token_confidences": [],
+                    "total_tokens": 0,
+                }
+            # Полный fallback: non-stream запрос
+            try:
+                ns_params = params.copy()
+                ns_params["stream"] = False
+                response = await self.openai_client.chat.completions.create(**ns_params)
+                if not response.choices:
+                    return {"text": "", "confidence": 0.0, "confidence_label": "Ошибка"}
+                choice = response.choices[0]
+                msg_text = choice.message.content or ""
+                from ..confidence.metrics import confidence_from_chat_logprobs
+                metrics = confidence_from_chat_logprobs(getattr(choice, "logprobs", None))
+                return {
+                    "text": msg_text.strip(),
+                    "confidence": metrics.get("average_confidence", 0.5),
+                    "confidence_label": metrics.get("confidence_label", "Нет logprobs"),
+                    "confidence_metrics": metrics,
+                }
+            except Exception as e:
+                logger.error(f"Non-stream fallback после stream ошибки не удался: {e}")
+                return {
+                    "text": content.strip(),
+                    "confidence": 0.5,
+                    "confidence_label": "Нет logprobs",
+                    "token_confidences": [],
+                    "total_tokens": 0,
+                }
+        # Без уверенности: если контент есть — возвращаем, иначе пусто
+        return content.strip()
+
     
     def _validate_chat_completion_params(
         self,

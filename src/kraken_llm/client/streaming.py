@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import numpy as np
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from openai.types.chat import ChatCompletionChunk
@@ -61,8 +62,9 @@ class StreamingLLMClient(BaseLLMClient):
         function_call: Optional[Union[str, Dict]] = None,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[Union[str, Dict]] = None,
+        include_confidence: Optional[bool] = None,
         **kwargs
-    ) -> str:
+    ) -> Union[str, Dict[str, Any]]:
         """
         Выполняет chat completion с автоматическим определением режима потока.
         
@@ -98,7 +100,138 @@ class StreamingLLMClient(BaseLLMClient):
                 "Для обычных запросов используйте StandardLLMClient."
             )
         
-        # Агрегация потокового ответа
+        # Если требуется уверенность, выполняем прямой проход по потоку со сбором logprobs и метрик
+        if include_confidence:
+            params = self._prepare_openai_params(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                **kwargs,
+            )
+            params.setdefault("logprobs", True)
+            if "top_logprobs" not in params:
+                top_lp = kwargs.get("top_logprobs", getattr(self.config, "top_logprobs", None))
+                if top_lp is None:
+                    top_lp = 5
+                params["top_logprobs"] = top_lp
+
+            stream_gen = await self.openai_client.chat.completions.create(**params)
+
+            content = ""
+            all_confidences: List[float] = []
+            token_confidences: List[Dict[str, Any]] = []
+
+            try:
+                async for chunk in stream_gen:
+                    if chunk.choices:
+                        ch = chunk.choices[0]
+                        if getattr(ch, "delta", None) and getattr(ch.delta, "content", None):
+                            content += ch.delta.content
+                        # logprobs per token
+                        if getattr(ch, "logprobs", None) and getattr(ch.logprobs, "content", None):
+                            for item in ch.logprobs.content:
+                                # item: ChatCompletionTokenLogprob
+                                lp = getattr(item, "logprob", None)
+                                if lp is not None:
+                                    p = float(np.exp(lp))
+                                    all_confidences.append(p)
+                                    # альтернативы
+                                    alts = []
+                                    top = getattr(item, "top_logprobs", None) or []
+                                    for alt in top:
+                                        alt_lp = getattr(alt, "logprob", None)
+                                        if alt_lp is not None:
+                                            alts.append(
+                                                {
+                                                    "token": getattr(alt, "token", "") or "",
+                                                    "confidence": float(np.exp(alt_lp)),
+                                                    "logprob": alt_lp,
+                                                }
+                                            )
+                                    token_confidences.append(
+                                        {
+                                            "token": getattr(item, "token", "") or "",
+                                            "confidence": p,
+                                            "confidence_label": "",  # добавим ниже
+                                            "logprob": lp,
+                                            "alternatives": alts,
+                                        }
+                                    )
+            except Exception as stream_err:
+                if getattr(self.config, "suppress_stream_warnings", False):
+                    logger.debug(f"Поток OpenAI прерван в StreamingLLMClient: {stream_err}; возвращаем накопленный контент")
+                else:
+                    logger.warning(f"Поток OpenAI прерван в StreamingLLMClient: {stream_err}; возвращаем накопленный контент")
+
+            # Если удалось собрать токенные метрики — возвращаем их
+            if all_confidences:
+                avg = float(np.mean(all_confidences))
+                for t in token_confidences:
+                    t["confidence_label"] = (
+                        "Очень высокая" if t["confidence"] >= 0.9 else
+                        "Высокая" if t["confidence"] >= 0.7 else
+                        "Средняя" if t["confidence"] >= 0.5 else
+                        "Низкая" if t["confidence"] >= 0.3 else
+                        "Очень низкая"
+                    )
+                return {
+                    "text": content.strip(),
+                    "confidence": avg,
+                    "confidence_label": (
+                        "Очень высокая" if avg >= 0.9 else
+                        "Высокая" if avg >= 0.7 else
+                        "Средняя" if avg >= 0.5 else
+                        "Низкая" if avg >= 0.3 else
+                        "Очень низкая"
+                    ),
+                    "token_confidences": token_confidences,
+                    "total_tokens": len(token_confidences),
+                }
+
+            # Если контент частично есть, но метрик нет — возвращаем без logprobs
+            if content.strip():
+                return {
+                    "text": content.strip(),
+                    "confidence": 0.5,
+                    "confidence_label": "Нет logprobs",
+                    "token_confidences": [],
+                    "total_tokens": 0,
+                }
+
+            # Полный фоллбек: не получили ни контента, ни метрик — пробуем non-stream запрос
+            try:
+                ns_params = params.copy()
+                ns_params["stream"] = False
+                # Обеспечим logprobs для расчета уверенности
+                ns_params.setdefault("logprobs", True)
+                if "top_logprobs" not in ns_params:
+                    ns_params["top_logprobs"] = 5
+                response = await self.openai_client.chat.completions.create(**ns_params)
+                if not response.choices:
+                    return {"text": "", "confidence": 0.0, "confidence_label": "Ошибка"}
+                choice = response.choices[0]
+                msg_text = choice.message.content or ""
+                from ..confidence.metrics import confidence_from_chat_logprobs
+                metrics = confidence_from_chat_logprobs(getattr(choice, "logprobs", None))
+                return {
+                    "text": msg_text.strip(),
+                    "confidence": metrics.get("average_confidence", 0.5),
+                    "confidence_label": metrics.get("confidence_label", "Нет logprobs"),
+                    "confidence_metrics": metrics,
+                }
+            except Exception:
+                # Возвращаем пустой безопасный ответ
+                return {
+                    "text": "",
+                    "confidence": 0.5,
+                    "confidence_label": "Нет logprobs",
+                    "token_confidences": [],
+                    "total_tokens": 0,
+                }
+
+        # Агрегация потокового ответа по умолчанию
         chunks = []
         async for chunk in self.chat_completion_stream(
             messages=messages,

@@ -57,9 +57,13 @@ from .tools import (
 LLMClient = StandardLLMClient  # Основной клиент для демо-приложения
 
 # Информация о версии
-__version__ = "0.1.0"
-__author__ = "Anton"
-__email__ = "anton@example.com"
+from importlib.metadata import PackageNotFoundError, version as _version
+try:
+    __version__ = _version("kraken_llm")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+__author__ = "Anton Shalin"
+__email__ = "anton.shalin@gmail.com"
 
 # Экспорт публичного API
 __all__ = [

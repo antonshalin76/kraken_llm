@@ -19,6 +19,7 @@ Kraken LLM Framework предоставляет единый интерфейс 
 - **Речевые технологии**: ASR (распознавание речи), TTS (синтез речи), диаризация спикеров
 - **Рассуждающие модели**: Поддержка Chain of Thought и нативных thinking токенов
 - **Адаптивность**: Автоматический выбор оптимального режима работы
+- **Режим уверенной генерации (confidence-aware)**: интеграция logprobs, метрики уверенности для ответа и токенов, множественная перегенерация с фильтрацией по порогам
 - **Анализ возможностей**: Автоматическое определение возможностей моделей
 
 ## Установка
@@ -471,6 +472,139 @@ async for chunk_data in handler.process_stream(response_stream):
 full_content = aggregator.get_aggregated_content()
 ```
 
+## Уверенность (logprobs), множественная генерация и фильтрация
+
+Kraken умеет работать с вероятностями токенов (logprobs) и предоставляет удобные утилиты для:
+- получения интегральной «уверенности» ответа целиком,
+- сбора пер‑токенных метрик уверенности при потоковой генерации,
+- многократной перегенерации с фильтрацией по порогам уверенности ответа и отдельного токена.
+
+### Быстрая интеграция уверенности для обычных запросов
+
+Добавьте include_confidence=True, чтобы получить словарь с текстом и метриками уверенности:
+
+```python path=null start=null
+from kraken_llm import LLMConfig, create_standard_client
+
+config = LLMConfig(endpoint=..., api_key=..., model=...)
+async with create_standard_client(config) as client:
+    result = await client.chat_completion(
+        messages=[{"role": "user", "content": "Кратко объясни ИИ"}],
+        include_confidence=True,
+        max_tokens=256,
+    )
+    print(result["text"], result["confidence"], result["confidence_label"])  # 0..1 и человеко‑читаемая метка
+```
+
+### Потоковая генерация с пер‑токенными метриками
+
+Для моделей, отдающих logprobs в стриме (например, vLLM), можно собирать уверенность по каждому токену:
+
+```python path=null start=null
+from kraken_llm import LLMConfig, create_streaming_client
+
+config = LLMConfig(endpoint=..., api_key=..., model=...)
+async with create_streaming_client(config) as client:
+    result = await client.chat_completion(
+        messages=[{"role": "user", "content": "Объясни ML простыми словами"}],
+        include_confidence=True,  # включает logprobs и агрегацию
+        max_tokens=256,
+    )
+    # result содержит token_confidences: [{token, confidence, confidence_label, ...}], total_tokens
+```
+
+Совет: для более стабильной потоковой работы с vLLM используйте нативный стрим SDK и, при необходимости, подавляйте предупреждения об обрывах:
+
+```env
+LLM_FORCE_OPENAI_STREAMING=true
+LLM_SUPPRESS_STREAM_WARNINGS=true
+```
+
+### Множественная генерация с фильтрацией по уверенности
+
+Модуль фильтрации выполняет несколько попыток генерации и возвращает первую, удовлетворяющую порогам уверенности. Если ни одна попытка не прошла порог, возвращается лучшая по уверенности.
+
+```python path=null start=null
+from kraken_llm import LLMConfig, create_standard_client
+from kraken_llm.confidence.filter import ConfidenceFilterConfig, ensure_confident_chat
+
+config = LLMConfig(endpoint=..., api_key=..., model=..., force_openai_streaming=True)
+async with create_standard_client(config) as client:
+    messages = [{"role": "user", "content": "Дай краткое объяснение ИИ"}]
+
+    cfg = ConfidenceFilterConfig(
+        min_confidence=0.8,     # порог по средней уверенности ответа
+        max_attempts=3,         # максимум перегенераций
+        prefer_streaming=True,  # собрать пер‑токенные метрики в стриме, если поддерживается
+        per_token_threshold=0.4,        # порог токенной уверенности
+        max_low_conf_fraction=0.34,     # допустимая доля токенов ниже порога
+        # max_low_conf_count=None,      # или абсолютное число
+    )
+
+    result = await ensure_confident_chat(
+        client,
+        messages=messages,
+        cfg=cfg,
+        max_tokens=400,
+    )
+
+    # Структура результата:
+    # {
+    #   "text": str,
+    #   "confidence": float,             # усредненная уверенность (0..1)
+    #   "confidence_label": str,
+    #   "attempts_made": int,
+    #   "success": bool,                 # True, если достигнут min_confidence и (опц.) токенные ограничения
+    #   "all_attempts": [ {attempt, temperature, text, confidence, confidence_label}, ... ],
+    #   "token_confidences": [...],      # при prefer_streaming и поддержке сервера
+    #   "total_tokens": int
+    # }
+
+    # Если success=False, ensure_confident_chat вернет лучшую по уверенности попытку из всех.
+```
+
+Пояснения к параметрам фильтрации:
+- min_confidence — целевой порог уверенности ответа целиком (по среднему значению per‑token вероятностей при наличии logprobs или по агрегированной метрике из non‑stream ответа)
+- prefer_streaming — если True, попытка выполняется так, чтобы собрать пер‑токенные метрики; при поддержке сервером позволяет фильтровать по профилю токенов
+- per_token_threshold — токены с confidence ниже порога считаются «низкоуверенными»
+- max_low_conf_fraction / max_low_conf_count — ограничения на долю/число низкоуверенных токенов (используются только при prefer_streaming)
+
+Практические рекомендации:
+- Для стабильного стрима повысьте таймауты: LLM_READ_TIMEOUT=300, LLM_WRITE_TIMEOUT=300, LLM_CONNECT_TIMEOUT=10
+- Для vLLM часто полезно FORCE_OPENAI_STREAMING=true
+- Если видите предупреждения об «incomplete chunked read», можно включить SUPPRESS_STREAM_WARNINGS=true — библиотека всё равно вернёт накопленный контент или выполнит безопасный non‑stream fallback
+
+### Область применения
+- Клиентские ассистенты и чат‑боты, где качество и надежность важнее скорости: повторная генерация повышает шанс получить стабильный ответ
+- Контент‑модерация/безопасность: отбрасывание ответов с низкой уверенности, усиление фильтров на уровне токенов
+- Бизнес‑логика с «барьером качества»: генерация до достижения заданного порога уверенности
+- UI со стримингом: показ промежуточного текста и накопление пер‑токенных метрик для мониторинга качества в реальном времени
+- Автономные пайплайны: повторная генерация и выбор лучшего ответа для последующих шагов (RAG, верификация, пост‑обработка)
+
+### Возможности режима уверенной генерации
+- Агрегированная уверенность ответа (0..1) и человеко‑читаемые метки уровня уверенности
+- Пер‑токенные метрики уверенности в потоке (при поддержке провайдером logprobs в streaming)
+- Множественная перегенерация с термостатом: управление температурой по попыткам (start, step, max)
+- Фильтрация по порогам: ответ целиком (min_confidence) + профиль токенов (per_token_threshold, max_low_conf_fraction/max_low_conf_count)
+- Возврат лучшей попытки, если порог не достигнут за max_attempts
+- Прозрачные фоллбеки при обрыве стрима: накопленный контент или безопасный non‑stream запрос с метриками
+- Глобальные флаги управления стримом: FORCE_OPENAI_STREAMING, SUPPRESS_STREAM_WARNINGS
+
+### Ограничения и важные замечания
+- Поддержка logprobs зависит от провайдера; некоторые отдают logprobs только в стриме (или вовсе не поддерживают)
+- Значения logprobs/уверенности не являются «истинной вероятностью» правильности ответа; это полезная, но эвристическая метрика
+- Перегенерация увеличивает задержку и стоимость — используйте разумные значения max_attempts и max_tokens
+- Потоковая передача чувствительна к таймаутам/прокси (SSE/CDN); рекомендуются повышенные таймауты и нативный стрим SDK
+- Для function/tool calls метрики confidence применяются только к текстовой части; структурированный вывод не всегда имеет токенные logprobs
+- Различия в токенизации и форматах провайдеров могут влиять на сравнимость метрик между моделями
+
+### Рекомендации по конфигурации
+- Умерьте длину ответов (max_tokens 256–512) и используйте стоп‑последовательности, если это применимо
+- Для стабильности включите нативный стрим и подавление предупреждений:
+  - LLM_FORCE_OPENAI_STREAMING=true
+  - LLM_SUPPRESS_STREAM_WARNINGS=true
+- Для стрима увеличьте таймауты: LLM_READ_TIMEOUT=300, LLM_WRITE_TIMEOUT=300, LLM_CONNECT_TIMEOUT=10
+
 ## Анализ возможностей моделей
 
 ### ModelCapabilitiesAnalyzer
@@ -500,6 +634,142 @@ async with create_universal_client_from_report(report, model_name="my_model") as
     # Клиент настроен под возможности конкретной модели
     capabilities = client.get_available_capabilities()
     print(f"Подтвержденные возможности: {capabilities}")
+```
+
+## Уверенность ответов и LogProbs
+
+Kraken LLM поддерживает запрос и обработку logprobs, а также вычисление метрик уверенности.
+
+- Включите logprobs глобально через конфигурацию (переменные окружения или LLMConfig)
+- Либо укажите их при вызове методов клиентов
+- Для удобства добавлен модуль kraken_llm.confidence.metrics с утилитами расчёта
+
+### Включение через переменные окружения
+
+```bash
+export LLM_LOGPROBS=true
+export LLM_TOP_LOGPROBS=5   # 1..5 для chat completions
+```
+
+### Пример: получение метрик уверенности (non-stream)
+
+```python path=null start=null
+from kraken_llm import create_standard_client, LLMConfig
+
+config = LLMConfig(logprobs=True, top_logprobs=5)
+async with create_standard_client(config) as client:
+    result = await client.chat_completion(
+        messages=[{"role": "user", "content": "Столица Франции?"}],
+        include_confidence=True
+    )
+    # result — словарь:
+    # {
+    #   "text": str,
+    #   "confidence": float,
+    #   "confidence_label": str,
+    #   "confidence_metrics": {...}
+    # }
+```
+
+### Пример: потоковая генерация с метриками уверенности (агрегация)
+
+```python path=null start=null
+from kraken_llm import create_streaming_client
+
+async with create_streaming_client() as client:
+    result = await client.chat_completion(
+        messages=[{"role": "user", "content": "Кратко объясни ИИ"}],
+        include_confidence=True  # Клиент соберёт метрики из streaming чанков
+    )
+    print(result["confidence"], result["confidence_label"])  # агрегированная уверенность по токенам
+```
+
+### Ручной расчёт по логпробам
+Если вы получаете «сырые» ответы/чанки с logprobs, используйте утилиты:
+
+```python path=null start=null
+from kraken_llm.confidence.metrics import (
+    confidence_from_chat_logprobs,
+    token_confidences_from_stream_logprobs,
+)
+
+# Для обычного ответа (choice.logprobs)
+metrics = confidence_from_chat_logprobs(choice.logprobs)
+print(metrics["average_confidence"], metrics["confidence_label"]) 
+
+# Для потоковых чанков (choice.logprobs)
+per_token = token_confidences_from_stream_logprobs(chunk_choice.logprobs)
+```
+
+Примечание: поддержка logprobs зависит от провайдера/эндоинта и может отсутствовать.
+
+### Фильтрация/перегенерация по уверенности
+
+```python path=null start=null
+from kraken_llm import create_standard_client
+from kraken_llm.confidence.filter import ConfidenceFilterConfig, ensure_confident_chat
+
+cfg = ConfidenceFilterConfig(
+    min_confidence=0.8,
+    max_attempts=3,
+    prefer_streaming=True,          # Пытаться собирать пер-токенные метрики
+    per_token_threshold=0.4,        # Порог низкой уверенности токена
+    max_low_conf_fraction=0.3       # Не более 30% низкоуверенных токенов
+)
+
+async with create_standard_client() as client:
+    result = await ensure_confident_chat(
+        client,
+        messages=[{"role": "user", "content": "Кратко объясни ИИ"}],
+        cfg=cfg,
+        max_tokens=200
+    )
+
+print(result["confidence"], result["confidence_label"], result["attempts_made"], result["success"])  
+print(result["text"])  # итоговый текст
+```
+
+### Пример с UniversalLLMClient и logprobs
+
+```python path=null start=null
+from dotenv import load_dotenv
+from kraken_llm import LLMConfig, create_universal_client
+
+load_dotenv(".env")
+config = LLMConfig()  # параметры возьмутся из .env
+
+async with create_universal_client(config) as client:
+    # Обычная генерация
+    text = await client.chat_completion([{"role": "user", "content": "Поясни, что такое ИИ"}], max_tokens=150)
+
+    # Генерация с метриками уверенности (logprobs)
+    with_conf = await client.chat_completion(
+        [{"role": "user", "content": "Поясни, что такое ИИ"}],
+        include_confidence=True,
+        max_tokens=150,
+    )
+
+    # Фильтрация/перегенерация по порогу уверенности
+    from kraken_llm.confidence.filter import ConfidenceFilterConfig, ensure_confident_chat
+
+    cfg = ConfidenceFilterConfig(min_confidence=0.8, max_attempts=3, prefer_streaming=True)
+    filtered = await ensure_confident_chat(
+        client,
+        messages=[{"role": "user", "content": "Поясни, что такое ИИ простыми словами"}],
+        cfg=cfg,
+        max_tokens=180,
+    )
+```
+
+### Подготовка окружения (.env)
+
+```env
+LLM_ENDPOINT=http://localhost:8080
+LLM_API_KEY=your_api_key_or_token
+LLM_MODEL=chat
+# (опционально) глобально запросить logprobs
+LLM_LOGPROBS=true
+LLM_TOP_LOGPROBS=5
 ```
 
 ## Обработка ошибок

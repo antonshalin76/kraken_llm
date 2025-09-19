@@ -13,3 +13,5 @@ venv.bak/
 sgr_venv/
 logs/
 model_capabilities_analyzer.log
+dist/
+build/

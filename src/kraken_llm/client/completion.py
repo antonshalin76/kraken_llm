@@ -92,6 +92,15 @@ class CompletionLLMClient(BaseLLMClient):
         
         if stream is not None:
             params["stream"] = stream
+
+        # Logprobs для legacy /v1/completions ожидает целочисленное значение
+        # Желаемое значение k из kwargs или config
+        lp_kw = kwargs.get("logprobs", None)
+        top_lp_kw = kwargs.get("top_logprobs", getattr(self.config, "top_logprobs", None))
+        if isinstance(lp_kw, int):
+            params["logprobs"] = lp_kw
+        elif lp_kw is True or (lp_kw is None and getattr(self.config, "logprobs", None)):
+            params["logprobs"] = top_lp_kw or 1
             
         # Добавляем дополнительные параметры
         for key, value in kwargs.items():

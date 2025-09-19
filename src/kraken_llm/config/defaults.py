@@ -25,8 +25,8 @@ DEFAULT_OUTLINES_SO_MODE = False
 
 # Значения по умолчанию для таймаутов (в секундах)
 DEFAULT_CONNECT_TIMEOUT = 10.0
-DEFAULT_READ_TIMEOUT = 60.0
-DEFAULT_WRITE_TIMEOUT = 10.0
+DEFAULT_READ_TIMEOUT = 300.0
+DEFAULT_WRITE_TIMEOUT = 300.0
 
 # Значения по умолчанию для SSL
 DEFAULT_SSL_VERIFY = True
@@ -48,3 +48,11 @@ DEFAULT_MODELS_PATH = "/v1/models"
 
 # Значения по умолчанию для режима API
 DEFAULT_API_MODE = "openai_compatible"  # openai_compatible, custom, direct
+
+# Значения по умолчанию для LogProbs
+DEFAULT_LOGPROBS: Optional[bool] = None  # Не запрашивать logprobs по умолчанию
+DEFAULT_TOP_LOGPROBS: Optional[int] = None  # Поставщик может выбрать дефолт или 5
+
+# Глобальные флаги потокового поведения
+DEFAULT_FORCE_OPENAI_STREAMING = False
+DEFAULT_SUPPRESS_STREAM_WARNINGS = False
