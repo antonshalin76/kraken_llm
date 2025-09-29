@@ -66,6 +66,16 @@ __author__ = "Anton Shalin"
 __email__ = "anton.shalin@gmail.com"
 
 # Экспорт публичного API
+# Утилиты визуализации уверенности (re-export для удобства)
+from .utils.color import (
+    colorize_text_ansi,
+    colorize_text_html,
+    colorize_tokens_ansi,
+    colorize_tokens_html,
+    get_confidence_legend_ansi,
+    get_confidence_legend_html,
+)
+
 __all__ = [
     # Основные клиенты
     "BaseLLMClient",
@@ -121,6 +131,14 @@ __all__ = [
     "default_function_registry",
     "default_tool_registry",
     "default_executor",
+
+    # Утилиты визуализации уверенности
+    "colorize_text_ansi",
+    "colorize_text_html",
+    "colorize_tokens_ansi",
+    "colorize_tokens_html",
+    "get_confidence_legend_ansi",
+    "get_confidence_legend_html",
     
     # Версия
     "__version__",

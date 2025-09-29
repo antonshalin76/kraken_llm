@@ -20,6 +20,7 @@ Kraken LLM Framework предоставляет единый интерфейс 
 - **Рассуждающие модели**: Поддержка Chain of Thought и нативных thinking токенов
 - **Адаптивность**: Автоматический выбор оптимального режима работы
 - **Режим уверенной генерации (confidence-aware)**: интеграция logprobs, метрики уверенности для ответа и токенов, множественная перегенерация с фильтрацией по порогам
+- **Цветовая визуализация уверенности**: ANSI/HTML-колоризация текста и токенов, легенды, интерактивный стриминговый чат‑бот с градиентом уверенности
 - **Анализ возможностей**: Автоматическое определение возможностей моделей
 
 ## Установка
@@ -453,6 +454,77 @@ async with create_embeddings_client() as client:
 
 ## Потоковые операции
 
+### Цветовая визуализация уверенности (ANSI/HTML)
+
+Начиная с версии 0.1.4, Kraken предоставляет утилиты для цветовой визуализации уверенности ответа и отдельных токенов как в терминале (ANSI), так и для HTML.
+
+- colorize_text_ansi(text, confidence: float) — окрасить произвольный текст по агрегированной уверенности 0..1.
+- colorize_tokens_ansi(token_confidences: list[dict]) — окрасить последовательность токенов, где каждый элемент содержит {token, confidence}.
+- get_confidence_legend_ansi() — вернуть легенду (градиент) для терминала.
+- Аналоги для HTML: colorize_text_html, colorize_tokens_html, get_confidence_legend_html.
+
+Пример ANSI-колоризации по токенам:
+
+```python path=null start=null
+from kraken_llm.utils.color import colorize_tokens_ansi, get_confidence_legend_ansi
+
+# token_confidences можно получить из client.chat_completion(... include_confidence=True)
+# или из ensure_confident_chat при prefer_streaming=True
+print(get_confidence_legend_ansi())
+print(colorize_tokens_ansi([
+    {"token": "Привет", "confidence": 0.92},
+    {"token": ", ", "confidence": 0.75},
+    {"token": "мир", "confidence": 0.48},
+    {"token": "!", "confidence": 0.33},
+]))
+```
+
+Пример агрегированной колоризации текста:
+
+```python path=null start=null
+from kraken_llm.utils.color import colorize_text_ansi
+
+text = "Это пример ответа"
+confidence = 0.81
+print(colorize_text_ansi(text, confidence))
+```
+
+### Интерактивный стриминговый чат‑бот с градиентом уверенности
+
+В examples добавлен интерактивный бот с двумя режимами стриминга, показывающий уверенность токенов цветом:
+
+- REALTIME — токены выводятся по мере генерации, каждый окрашен по своей уверенности
+- AGGREGATED — бот собирает весь ответ и выводит итоговую статистику и окрашенный текст
+
+Запуск:
+
+```bash path=null start=null
+python3 examples/chatbot_streaming_colors.py \
+  --mode realtime \
+  --min-confidence 0.8 \
+  --per-token-threshold 0.4 \
+  --max-low-conf-fraction 0.34
+```
+
+Необходимые переменные окружения:
+
+```env path=null start=null
+LLM_ENDPOINT=http://localhost:8080
+LLM_API_KEY=... # или LLM_TOKEN
+LLM_MODEL=chat
+```
+
+Поддержка токенных метрик в стриме зависит от провайдера (logprobs). Для стабильной работы рекомендуется:
+
+```env path=null start=null
+LLM_FORCE_OPENAI_STREAMING=true
+LLM_SUPPRESS_STREAM_WARNINGS=true
+LLM_LOGPROBS=true
+LLM_TOP_LOGPROBS=5
+```
+
+Команды внутри бота: 'exit'/'quit' — выход; 'clear' — очистка истории; 'mode' — смена режима.
+
 ### Streaming Handler
 
 ```python
@@ -871,6 +943,7 @@ async with create_universal_client() as client:
 - `reasoning_example.py` - Рассуждающие модели
 - `multimodal_example.py` - Мультимодальные операции
 - `streaming_example.py` - Потоковые операции
+- `chatbot_streaming_colors.py` - Интерактивный чат‑бот со стримингом и цветовой визуализацией уверенности
 - `function_tool_example.py` - Функции и инструменты
 
 ## Архитектура
