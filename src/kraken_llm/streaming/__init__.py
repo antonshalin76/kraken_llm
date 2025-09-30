@@ -7,8 +7,10 @@
 """
 
 from .handler import StreamHandler, StreamAggregator
+from .repair import token_stream_with_shadow_repair
 
 __all__ = [
     "StreamHandler",
     "StreamAggregator",
+    "token_stream_with_shadow_repair",
 ]

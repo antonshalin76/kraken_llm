@@ -20,6 +20,7 @@ Kraken LLM Framework предоставляет единый интерфейс 
 - **Рассуждающие модели**: Поддержка Chain of Thought и нативных thinking токенов
 - **Адаптивность**: Автоматический выбор оптимального режима работы
 - **Режим уверенной генерации (confidence-aware)**: интеграция logprobs, метрики уверенности для ответа и токенов, множественная перегенерация с фильтрацией по порогам
+- **Live‑ремонт низкоуверенных токенов (shadow/server)**: форк потоков, откаты проблемных токенов, динамические штрафы от повторов, анти‑loop защита и гарантированное завершение ответа
 - **Цветовая визуализация уверенности**: ANSI/HTML-колоризация текста и токенов, легенды, интерактивный стриминговый чат‑бот с градиентом уверенности
 - **Анализ возможностей**: Автоматическое определение возможностей моделей
 
@@ -491,6 +492,116 @@ print(colorize_text_ansi(text, confidence))
 
 ### Интерактивный стриминговый чат‑бот с градиентом уверенности
 
+#### Live‑ремонт низкоуверенных токенов (shadow/server)
+
+Kraken поддерживает «ремонт» (перегенерацию) токенов с низкой уверенностью в потоковом режиме и в обычных режимах, с целью довести ответ до полного завершения, при максимизации уверенности каждого токена в ответе.
+
+Режимы ремонта:
+- off — ремонт выключен.
+- shadow — клиентский «теневой» ремонт: при падении уверенности токена ниже порога поток откатывает проблемный токен и форкает «ремонтный» поток с консервативными сэмплинг‑параметрами. Требует logprobs в стриме.
+- server — серверный ремонт: включает порог min_p на стороне бэкенда (если поддерживается, напр. vLLM), снижая вероятность выборки низкоуверенных токенов.
+
+Ключевые параметры (через LLMConfig или .env):
+- repair_mode: off | shadow | server (LLM_REPAIR_MODE)
+- per_token_repair_threshold: float, порог уверенности токена для ремонта (LLM_PER_TOKEN_REPAIR_THRESHOLD)
+- max_attempts_per_token: int, максимум попыток для одного «слота» токена (LLM_MAX_ATTEMPTS_PER_TOKEN)
+- max_live_repairs: int, глобальный бюджет ремонтов в одном ответе (LLM_MAX_LIVE_REPAIRS)
+- server_min_p: float, порог min_p в server‑режиме (LLM_SERVER_MIN_P); если не задан, берётся per_token_repair_threshold
+
+Анти‑loop защита:
+- Встроенные эвристики детектируют навязчивые повторы (символьный хвост, n‑граммы, повтор последнего «предложения»), при необходимости повышают frequency/presence penalty на продолжениях.
+- При многократных повторах поток принудительно завершается событием done (задача — довести ответ до конца, а не зависнуть).
+
+Пример CLI (realtime, shadow):
+
+```bash path=null start=null
+python3 examples/chatbot_streaming_colors.py \
+  --mode realtime \
+  --repair-mode shadow \
+  --per-token-threshold 0.5 \
+  --max-attempts-per-token 8 \
+  --no-rollback-marker
+```
+
+Советы:
+- Для shadow рекомендуется: LLM_FORCE_OPENAI_STREAMING=true, LLM_LOGPROBS=true, LLM_TOP_LOGPROBS=5.
+- В примере realtime реализовано «мягкое стирание» символов при rollback — экран остаётся чистым, без дублей.
+
+Пример CLI (server, min_p):
+
+```bash path=null start=null
+python3 examples/chatbot_streaming_colors.py \
+  --mode realtime \
+  --repair-mode server \
+  --server-min-p 0.4
+```
+
+Прямое использование API (shadow):
+
+```python path=null start=null
+from kraken_llm import LLMConfig, create_streaming_client
+from kraken_llm.streaming import token_stream_with_shadow_repair
+
+config = LLMConfig(
+    endpoint=..., api_key=..., model=...,
+    repair_mode="shadow",
+    per_token_repair_threshold=0.5,
+    max_attempts_per_token=8,
+    max_live_repairs=8,
+    force_openai_streaming=True,
+    logprobs=True,
+    top_logprobs=5,
+)
+
+messages = [{"role": "user", "content": "Напиши эссе про радугу"}]
+async with create_streaming_client(config) as client:
+    async for ev in token_stream_with_shadow_repair(
+        client,
+        messages,
+        per_token_threshold=0.5,
+        max_tokens=512,
+        enable_cutover=True,
+    ):
+        if ev["type"] == "token":
+            print(ev["token"], end="")
+        elif ev["type"] == "rollback":
+            # Можно мягко стереть ev["count"] символов в UI
+            pass
+        elif ev["type"] == "done":
+            break
+```
+
+Интеграция с Structured Output (SO):
+- В server режиме библиотека пробрасывает min_p на сторону бэкенда как extra_body.min_p (native и Outlines).
+- В native SO (response_format) добавлены консервативные повторные попытки, чтобы дотянуться до валидного JSON; при неудаче — стандартные fallback‑валидаторы.
+
+Интеграция с режимами размышления (reasoning):
+- В потоковом reasoning при включенном repair_mode используется тот же устойчивый поток с ремонтом. Откаты сокращают текущий буфер шага, шаги продолжают парситься до завершения (done). Встроены анти‑loop защита и принудительное завершение при патологических повторах.
+
+Подробнее см. docs/confidence_repair_cookbook.md.
+
+##### Переменные окружения для ремонта токенов (.env)
+
+```env
+# Режим ремонта: off | shadow | server
+LLM_REPAIR_MODE=shadow
+
+# Порог уверенности токена (0..1), ниже которого запускается ремонт (shadow) или min_p (server)
+LLM_PER_TOKEN_REPAIR_THRESHOLD=0.5
+
+# Лимиты ремонтов
+LLM_MAX_ATTEMPTS_PER_TOKEN=8     # попыток на один «слот» токена
+LLM_MAX_LIVE_REPAIRS=8           # глобальный бюджет ремонтов на один ответ
+
+# Порог min_p для server‑режима (если сервер поддерживает)
+LLM_SERVER_MIN_P=0.4
+
+# Рекомендации для shadow‑ремонта
+LLM_FORCE_OPENAI_STREAMING=true
+LLM_LOGPROBS=true
+LLM_TOP_LOGPROBS=5
+```
+
 В examples добавлен интерактивный бот с двумя режимами стриминга, показывающий уверенность токенов цветом:
 
 - REALTIME — токены выводятся по мере генерации, каждый окрашен по своей уверенности
@@ -514,7 +625,7 @@ LLM_API_KEY=... # или LLM_TOKEN
 LLM_MODEL=chat
 ```
 
-Поддержка токенных метрик в стриме зависит от провайдера (logprobs). Для стабильной работы рекомендуется:
+Поддержка токенных метрик в стриме зависит от провайдера (logprobs). Для стабильной работы и работы shadow‑ремонта рекомендуется:
 
 ```env path=null start=null
 LLM_FORCE_OPENAI_STREAMING=true

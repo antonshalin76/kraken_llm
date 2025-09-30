@@ -401,22 +401,65 @@ class ReasoningLLMClient(BaseLLMClient):
         step_number = 0
         
         try:
-            async for chunk in self.chat_completion_stream(messages, **reasoning_params):
-                current_step += chunk
-                
-                # Проверяем, завершился ли шаг
-                if self._is_step_complete(current_step):
-                    step_number += 1
-                    reasoning_step = self._parse_single_step(current_step, step_number)
+            # Если включен режим ремонта токенов — используем устойчивый поток с ремонтом
+            repair_mode = (getattr(self.config, "repair_mode", None) or "off").lower()
+            per_token_threshold = getattr(self.config, "per_token_repair_threshold", None) or 0.4
+            use_repair_stream = repair_mode in {"shadow", "server"}
+
+            if use_repair_stream:
+                from ..streaming.repair import token_stream_with_shadow_repair
+                from .streaming import StreamingLLMClient
+                stream_client = StreamingLLMClient(self.config)
+                try:
+                    async for ev in token_stream_with_shadow_repair(
+                        stream_client,
+                        messages,
+                        per_token_threshold=per_token_threshold,
+                        max_tokens=reasoning_params.get("max_tokens", 2000),
+                        enable_cutover=(repair_mode == "shadow"),
+                    ):
+                        if ev.get("type") == "token":
+                            token_text = ev.get("token", "").replace('Ġ', ' ').replace('▁', ' ')
+                            current_step += token_text
+                            # Проверяем, завершился ли шаг
+                            if self._is_step_complete(current_step):
+                                step_number += 1
+                                reasoning_step = self._parse_single_step(current_step, step_number)
+                                if reasoning_step:
+                                    yield reasoning_step
+                                current_step = ""
+                                if step_number >= self.reasoning_config.max_reasoning_steps:
+                                    break
+                        elif ev.get("type") == "rollback":
+                            # Удалим N последних символов из текущего шага
+                            count = int(ev.get("count", 0) or 0)
+                            if count > 0 and current_step:
+                                current_step = current_step[:-count]
+                        elif ev.get("type") == "done":
+                            break
+                finally:
+                    try:
+                        await stream_client.close()
+                    except Exception:
+                        pass
+            else:
+                # Обычный поток без ремонта
+                async for chunk in self.chat_completion_stream(messages, **reasoning_params):
+                    current_step += chunk
                     
-                    if reasoning_step:
-                        yield reasoning_step
-                    
-                    current_step = ""
-                    
-                    # Проверяем лимит шагов
-                    if step_number >= self.reasoning_config.max_reasoning_steps:
-                        break
+                    # Проверяем, завершился ли шаг
+                    if self._is_step_complete(current_step):
+                        step_number += 1
+                        reasoning_step = self._parse_single_step(current_step, step_number)
+                        
+                        if reasoning_step:
+                            yield reasoning_step
+                        
+                        current_step = ""
+                        
+                        # Проверяем лимит шагов
+                        if step_number >= self.reasoning_config.max_reasoning_steps:
+                            break
         
         except Exception as e:
             logger.error(f"Ошибка в streaming reasoning: {e}")

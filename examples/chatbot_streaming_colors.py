@@ -29,6 +29,7 @@ from kraken_llm.utils.color import (
     get_confidence_legend_ansi,
     get_confidence_description,
 )
+from kraken_llm.streaming import token_stream_with_shadow_repair
 from kraken_llm.confidence.filter import ConfidenceFilterConfig, ensure_confident_chat
 
 
@@ -41,13 +42,14 @@ class StreamingMode(Enum):
 class StreamingConfidenceChatBot:
     """Стриминговый чат-бот с цветовым градиентом уверенности."""
     
-    def __init__(self, config: LLMConfig, streaming_mode: StreamingMode = StreamingMode.REALTIME, *, min_confidence: float = 0.8, per_token_threshold: float = 0.4, max_low_conf_fraction: float = 0.34):
+    def __init__(self, config: LLMConfig, streaming_mode: StreamingMode = StreamingMode.REALTIME, *, min_confidence: float = 0.8, per_token_threshold: float = 0.4, max_low_conf_fraction: float = 0.34, no_rollback_marker: bool = False):
         self.config = config
         self.streaming_mode = streaming_mode
         # Пороговые значения уверенности
         self.min_confidence = float(min_confidence)
         self.per_token_threshold = float(per_token_threshold)
         self.max_low_conf_fraction = float(max_low_conf_fraction)
+        self.no_rollback_marker = bool(no_rollback_marker)
         self.conversation_history: List[Dict[str, str]] = []
         
     async def _maybe_regenerate(self, base_messages: List[Dict[str, str]], min_confidence: float, per_token_threshold: float, max_low_conf_fraction: float) -> None:
@@ -63,7 +65,7 @@ class StreamingConfidenceChatBot:
                 client,
                 messages=base_messages,
                 cfg=cfg,
-                max_tokens=512,
+                max_tokens=2048,
             )
         print("\n\n🔁 Результат перегенерации (фильтр уверенности):")
         if isinstance(regen, dict):
@@ -89,73 +91,152 @@ class StreamingConfidenceChatBot:
         total_text = ""
         start_time = time.time()
         
-        async with create_streaming_client(self.config) as client:
+        # Выбор режима ремонта
+        repair_mode = (self.config.repair_mode or "off").lower() if hasattr(self.config, "repair_mode") else "off"
+        # Режим с теневым ремонтом или серверный режим: стримим токены в реальном времени
+        if repair_mode in ("shadow", "server"):
+            client = create_streaming_client(self.config)
             try:
-                # Пробуем получить стрим с confidence информацией
-                response = await client.chat_completion(
-                    messages=self.conversation_history.copy(),
-                    include_confidence=True,
-                    max_tokens=512,
-                    logprobs=True,
-                    top_logprobs=5
-                )
-                
-                # Если response содержит token_confидences, используем их
-                if isinstance(response, dict) and "token_confidences" in response:
-                    token_confidences = response["token_confidences"]
-                    text = response.get("text", "")
-                    
-                    print("🎨 Токены с индивидуальными метриками:")
-                    
-                    # Отображаем токены по мере их "поступления" с небольшой задержкой для эффекта
-                    for i, token_info in enumerate(token_confidences):
-                        token = token_info.get("token", "")
-                        confidence = token_info.get("confidence", 0.5)
-                        
-                        # Очищаем токен от специальных символов
-                        clean_token = token.replace('Ġ', ' ').replace('▁', ' ')
-                        
-                        # Окрашиваем и выводим токен
-                        colored_token = colorize_text_ansi(clean_token, confidence)
-                        print(colored_token, end="", flush=True)
-                        
-                        collected_tokens.append(token_info)
-                        total_text += clean_token
-                        
-                        # Небольшая задержка для имитации реального стрима
-                        await asyncio.sleep(0.05)
-                    
-                    # Добавляем ответ в историю
-                    self.conversation_history.append({"role": "assistant", "content": text})
+                enable_cutover = (repair_mode == "shadow")
+                suppress_rollback = self.no_rollback_marker and enable_cutover
+                # Буферы отображения и стек видимых токенов (используем в обоих режимах)
+                display_text_buffer = ""
+                visible_tokens_stack: List[Dict[str, Any]] = []  # для итоговой окраски токенов и вычисления длины
 
-                    # Проверяем пороги и при необходимости выполняем перегенерацию
-                    overall_ok = float(response.get("confidence", 0.0) or 0.0) >= min_confidence
-                    confidences = [float(t.get("confidence", 0.0) or 0.0) for t in token_confidences]
-                    low_frac = (sum(1 for c in confidences if c < per_token_threshold) / len(confidences)) if confidences else 0.0
-                    if not overall_ok or low_frac > max_low_conf_fraction:
-                        base_messages = self.conversation_history[:-1]
-                        await self._maybe_regenerate(base_messages, min_confidence, per_token_threshold, max_low_conf_fraction)
-                    
-                else:
-                    # Fallback на обычный стрим без confidence
-                    print("⚡ Обычный стрим (без токен-уровневых метрик):")
-                    
-                    async for chunk in client.chat_completion_stream(
-                        messages=self.conversation_history.copy(),
-                        max_tokens=512
-                    ):
-                        # Окрашиваем chunk средней уверенностью
-                        colored_chunk = colorize_text_ansi(chunk, 0.5)
-                        print(colored_chunk, end="", flush=True)
-                        total_text += chunk
-                        await asyncio.sleep(0.02)
-                    
-                    # Добавляем собранный текст в историю
-                    self.conversation_history.append({"role": "assistant", "content": total_text})
-                
+                def _erase_last_chars(n: int) -> None:
+                    # Мягкое стирание n последних видимых символов
+                    if n <= 0:
+                        return
+                    try:
+                        sys.stdout.write("\b" * n + " " * n + "\b" * n)
+                        sys.stdout.flush()
+                    except Exception:
+                        # В безпечном режиме просто ничего не делаем
+                        pass
+
+                async for ev in token_stream_with_shadow_repair(
+                    client,
+                    self.conversation_history.copy(),
+                    per_token_threshold=per_token_threshold,
+                    max_tokens=512,
+                    enable_cutover=enable_cutover,
+                ):
+                    if ev.get("type") == "token":
+                        token = ev.get("token", "")
+                        conf = float(ev.get("confidence", 0.5) or 0.5)
+                        clean_token = token.replace('Ġ', ' ').replace('▁', ' ')
+                        if suppress_rollback:
+                            # Копим, не показываем до завершения
+                            display_text_buffer += clean_token
+                        else:
+                            # Печатаем с окраской
+                            print(colorize_text_ansi(clean_token, conf), end="", flush=True)
+                        # Ведём стек для обоих режимов
+                        visible_tokens_stack.append({"token": token, "confidence": conf, "visible_len": len(clean_token)})
+                        collected_tokens.append({"token": token, "confidence": conf})
+                        total_text += clean_token
+                    elif ev.get("type") == "rollback":
+                        count = int(ev.get("count", 0) or 0)
+                        if suppress_rollback:
+                            # Удаляем последний токен из локального буфера
+                            if count > 0 and display_text_buffer:
+                                display_text_buffer = display_text_buffer[:-count]
+                            if visible_tokens_stack:
+                                visible_tokens_stack.pop()
+                        else:
+                            # Мягкое стирание с экрана без маркера
+                            if count > 0:
+                                _erase_last_chars(count)
+                                total_text = total_text[:-count] if total_text else total_text
+                            if visible_tokens_stack:
+                                visible_tokens_stack.pop()
+                    elif ev.get("type") == "done":
+                        # Если скрывали откаты — выведем финальный чистый результат разом
+                        if suppress_rollback:
+                            if visible_tokens_stack:
+                                final_colored = colorize_tokens_ansi(visible_tokens_stack)
+                                print(final_colored, end="", flush=True)
+                                total_text = display_text_buffer  # перезапишем финальным текстом
+                        break
             except Exception as e:
                 print(f"\n❌ Ошибка стриминга: {e}")
                 return
+            finally:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+
+            # Добавляем собранный текст в историю
+            self.conversation_history.append({"role": "assistant", "content": total_text})
+        else:
+            async with create_streaming_client(self.config) as client:
+                try:
+                    # Пробуем получить стрим с confidence информацией
+                    response = await client.chat_completion(
+                        messages=self.conversation_history.copy(),
+                        include_confidence=True,
+                        max_tokens=2048,
+                        logprobs=True,
+                        top_logprobs=5
+                    )
+                    
+                    # Если response содержит token_confидences, используем их
+                    if isinstance(response, dict) and "token_confidences" in response:
+                        token_confidences = response["token_confidences"]
+                        text = response.get("text", "")
+                        
+                        print("🎨 Токены с индивидуальными метриками:")
+                        
+                        # Отображаем токены по мере их "поступления" с небольшой задержкой для эффекта
+                        for i, token_info in enumerate(token_confidences):
+                            token = token_info.get("token", "")
+                            confidence = token_info.get("confidence", 0.5)
+                            
+                            # Очищаем токен от специальных символов
+                            clean_token = token.replace('Ġ', ' ').replace('▁', ' ')
+                            
+                            # Окрашиваем и выводим токен
+                            colored_token = colorize_text_ansi(clean_token, confidence)
+                            print(colored_token, end="", flush=True)
+                            
+                            collected_tokens.append(token_info)
+                            total_text += clean_token
+                            
+                            # Небольшая задержка для имитации реального стрима
+                            await asyncio.sleep(0.05)
+                        
+                        # Добавляем ответ в историю
+                        self.conversation_history.append({"role": "assistant", "content": text})
+
+                        # Проверяем пороги и при необходимости выполняем перегенерацию
+                        overall_ok = float(response.get("confidence", 0.0) or 0.0) >= min_confidence
+                        confidences = [float(t.get("confidence", 0.0) or 0.0) for t in token_confidences]
+                        low_frac = (sum(1 for c in confidences if c < per_token_threshold) / len(confidences)) if confidences else 0.0
+                        if not overall_ok or low_frac > max_low_conf_fraction:
+                            base_messages = self.conversation_history[:-1]
+                            await self._maybe_regenerate(base_messages, min_confidence, per_token_threshold, max_low_conf_fraction)
+                        
+                    else:
+                        # Fallback на обычный стрим без confidence
+                        print("⚡ Обычный стрим (без токен-уровневых метрик):")
+                        
+                        async for chunk in client.chat_completion_stream(
+                            messages=self.conversation_history.copy(),
+                            max_tokens=2048
+                        ):
+                            # Окрашиваем chunk средней уверенностью
+                            colored_chunk = colorize_text_ansi(chunk, 0.5)
+                            print(colored_chunk, end="", flush=True)
+                            total_text += chunk
+                            await asyncio.sleep(0.02)
+                        
+                        # Добавляем собранный текст в историю
+                        self.conversation_history.append({"role": "assistant", "content": total_text})
+                
+                except Exception as e:
+                    print(f"\n❌ Ошибка стриминга: {e}")
+                    return
         
         end_time = time.time()
         
@@ -186,7 +267,7 @@ class StreamingConfidenceChatBot:
                 response = await client.chat_completion(
                     messages=self.conversation_history.copy(),
                     include_confidence=True,
-                    max_tokens=512,
+                    max_tokens=2048,
                     logprobs=True,
                     top_logprobs=5
                 )
@@ -413,8 +494,31 @@ async def main():
         help="Модель для использования (переопределяет переменную окружения)"
     )
     parser.add_argument(
+        "--no-rollback-marker",
+        action="store_true",
+        help="Скрывать индикатор отката и промежуточные неудачные токены; выводить только финальный чистый ответ"
+    )
+    parser.add_argument(
         "--endpoint",
         help="Endpoint API (переопределяет переменную окружения)"
+    )
+    parser.add_argument(
+        "--repair-mode",
+        choices=["off", "shadow", "server"],
+        default=os.getenv("LLM_REPAIR_MODE", "off"),
+        help="Режим ремонта токенов: off | shadow (теневой форк) | server (серверный порог min_p)"
+    )
+    parser.add_argument(
+        "--server-min-p",
+        type=float,
+        default=None,
+        help="Порог min_p для серверного режима (если поддерживается бэкендом, например vLLM)"
+    )
+    parser.add_argument(
+        "--max-attempts-per-token",
+        type=int,
+        default=int(os.getenv("LLM_MAX_ATTEMPTS_PER_TOKEN", "3")),
+        help="Максимум попыток перегенерации для КАЖДОГО низкоуверенного токена"
     )
     
     args = parser.parse_args()
@@ -433,7 +537,12 @@ async def main():
         top_logprobs=5,
         # Настройки для стабильного стрима
         force_openai_streaming=True,
-        suppress_stream_warnings=True
+        suppress_stream_warnings=True,
+        # Live-ремонт
+        repair_mode=args.repair_mode,
+        per_token_repair_threshold=args.per_token_threshold,
+        server_min_p=args.server_min_p,
+        max_attempts_per_token=args.max_attempts_per_token,
     )
     
     # Проверяем конфигурацию
@@ -449,6 +558,7 @@ async def main():
         min_confidence=args.min_confidence,
         per_token_threshold=args.per_token_threshold,
         max_low_conf_fraction=args.max_low_conf_fraction,
+        no_rollback_marker=bool(args.no_rollback_marker),
     )
     
     await chatbot.run()

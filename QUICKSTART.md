@@ -365,6 +365,43 @@ make lint
 make clean
 ```
 
+### Live‑ремонт неуверенных токенов (коротко)
+
+Включить shadow‑ремонт в примере стриминга:
+
+```bash path=null start=null
+python3 examples/chatbot_streaming_colors.py \
+  --mode realtime \
+  --repair-mode shadow \
+  --per-token-threshold 0.5 \
+  --max-attempts-per-token 8 \
+  --no-rollback-marker
+```
+
+Минимальная конфигурация в коде:
+
+```python path=null start=null
+from kraken_llm import LLMConfig
+config = LLMConfig(
+    repair_mode="shadow",
+    per_token_repair_threshold=0.5,
+    max_attempts_per_token=8,
+    max_live_repairs=8,
+    force_openai_streaming=True,
+    logprobs=True,
+    top_logprobs=5,
+)
+```
+
+Server‑режим (если поддерживается бэкендом):
+
+```bash path=null start=null
+python3 examples/chatbot_streaming_colors.py \
+  --mode realtime \
+  --repair-mode server \
+  --server-min-p 0.4
+```
+
 ### Запуск примеров
 
 ```bash

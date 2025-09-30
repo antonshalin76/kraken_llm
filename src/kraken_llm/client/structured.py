@@ -353,65 +353,90 @@ class StructuredLLMClient(BaseLLMClient):
             # Получаем JSON схему модели
             json_schema = response_model.model_json_schema()
 
-            # Подготовка параметров для AsyncOpenAI
-            params = self._prepare_openai_params(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-                **kwargs
-            )
+            # Базовые параметры выборки
+            base_temp = temperature or self.config.temperature
+            base_top_p = self.config.top_p
+            max_attempts = int(getattr(self.config, "max_live_repairs", 3) or 3)
 
-            # Добавляем response_format для structured output
-            params["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_model.__name__,
-                    "schema": json_schema,
-                    "strict": True
+            last_error: Optional[Exception] = None
+            for attempt in range(1, max_attempts + 1):
+                # Подготовка параметров для AsyncOpenAI
+                params = self._prepare_openai_params(
+                    messages=messages,
+                    model=model,
+                    temperature=max(0.0, base_temp * (0.6 ** (attempt - 1))),
+                    max_tokens=max_tokens,
+                    stream=False,
+                    **kwargs
+                )
+
+                # Добавляем response_format для structured output
+                params["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": response_model.__name__,
+                        "schema": json_schema,
+                        "strict": True
+                    }
                 }
-            }
 
-            # Сохраняем response_model отдельно для streaming агрегации (не передаем в API)
-            # params["_response_model"] = response_model  # Убираем - completion API не поддерживает
+                # Пробрасываем server min_p для режима ремонта на стороне сервера (если включен)
+                effective_repair_mode = (self.config.repair_mode or "off").lower()
+                if effective_repair_mode == "server":
+                    min_p = self.config.server_min_p or self.config.per_token_repair_threshold
+                    if min_p is not None:
+                        extra_body = params.get("extra_body", {})
+                        if "min_p" not in extra_body:
+                            extra_body["min_p"] = float(min_p)
+                        params["extra_body"] = extra_body
 
-            logger.debug(
-                f"Параметры OpenAI structured output: {list(params.keys())}")
+                logger.debug(
+                    f"Параметры OpenAI structured output (attempt {attempt}/{max_attempts}): {list(params.keys())}")
 
-            # Проверяем, поддерживает ли сервер обычные (не streaming) запросы
-            if await self._server_supports_non_streaming():
-                # Выполнение запроса через AsyncOpenAI
-                response: ChatCompletion = await self.openai_client.chat.completions.create(**params)
-                logger.debug(f"Получен ответ от OpenAI API: {response.id}")
+                # Проверяем, поддерживает ли сервер обычные (не streaming) запросы
+                try:
+                    if await self._server_supports_non_streaming():
+                        # Выполнение запроса через AsyncOpenAI
+                        response: ChatCompletion = await self.openai_client.chat.completions.create(**params)
+                        logger.debug(f"Получен ответ от OpenAI API: {response.id}")
 
-                # Извлекаем контент
-                if not response.choices:
-                    raise APIError(
-                        message="Ответ API не содержит choices",
-                        status_code=500,
-                        response_data={"response_id": response.id}
-                    )
+                        # Извлекаем контент
+                        if not response.choices:
+                            raise APIError(
+                                message="Ответ API не содержит choices",
+                                status_code=500,
+                                response_data={"response_id": getattr(response, 'id', 'n/a')}
+                            )
 
-                choice = response.choices[0]
-                content = choice.message.content
+                        choice = response.choices[0]
+                        content = choice.message.content
 
-                if not content:
-                    raise ValidationError(
-                        "Получен пустой ответ от модели",
-                        context={"response_id": response.id}
-                    )
-            else:
-                # Сервер поддерживает только streaming, используем агрегацию
-                content = await self._structured_via_streaming_aggregation(params)
+                        if not content:
+                            raise ValidationError(
+                                "Получен пустой ответ от модели",
+                                context={"response_id": getattr(response, 'id', 'n/a')}
+                            )
+                    else:
+                        # Сервер поддерживает только streaming, используем агрегацию
+                        content = await self._structured_via_streaming_aggregation(params)
 
-            logger.debug(f"Получен JSON контент: {len(content)} символов")
+                    logger.debug(f"Получен JSON контент: {len(content)} символов")
 
-            # Валидируем ответ по Pydantic модели
-            result = await self.validator.validate_response(content, response_model)
-            logger.info(
-                f"OpenAI structured output успешно сгенерирован и валидирован")
-            return result
+                    # Валидируем ответ по Pydantic модели
+                    result = await self.validator.validate_response(content, response_model)
+                    logger.info(
+                        f"OpenAI structured output успешно сгенерирован и валидирован (attempt {attempt})")
+                    return result
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Попытка {attempt}/{max_attempts} не удалась: {e}")
+                    # На следующей попытке делаем sampling более консервативным
+                    continue
+
+            # Если все попытки исчерпаны — пробрасываем последнюю ошибку
+            if last_error:
+                raise last_error
+            raise ValidationError("Не удалось получить валидный structured output", context={})
 
         except Exception as e:
             logger.error(f"Ошибка в _structured_non_stream_openai: {e}")
@@ -601,6 +626,14 @@ class StructuredLLMClient(BaseLLMClient):
                 "frequency_penalty": self.config.frequency_penalty,
                 "presence_penalty": self.config.presence_penalty,
             }
+
+            # Пробрасываем server min_p при включенном ремонтном режиме 'server'
+            effective_repair_mode = (self.config.repair_mode or "off").lower()
+            if effective_repair_mode == "server":
+                min_p = self.config.server_min_p or self.config.per_token_repair_threshold
+                if min_p is not None:
+                    request_data.setdefault("extra_body", {})
+                    request_data["extra_body"]["min_p"] = float(min_p)
 
             logger.debug("Выполняем HTTP запрос для Outlines")
 
@@ -1269,7 +1302,15 @@ class StructuredLLMClient(BaseLLMClient):
                 "presence_penalty": self.config.presence_penalty,
                 "stream": True  # Обязательно включаем streaming
             }
-            
+
+            # Пробрасываем server min_p при включенном ремонтном режиме 'server'
+            effective_repair_mode = (self.config.repair_mode or "off").lower()
+            if effective_repair_mode == "server":
+                min_p = self.config.server_min_p or self.config.per_token_repair_threshold
+                if min_p is not None:
+                    request_data.setdefault("extra_body", {})
+                    request_data["extra_body"]["min_p"] = float(min_p)
+
             logger.debug("Выполняем реальный streaming HTTP запрос для Outlines")
             
             import httpx

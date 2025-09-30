@@ -130,6 +130,14 @@ class LLMConfig(BaseSettings):
             "0.1 означает, что рассматриваются только токены, составляющие топ 10% вероятностной массы."
         ),
     )
+    top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Top-k sampling. Если поддерживается бэкендом (например, vLLM), задаёт количество кандидатов. "
+            "Передаётся в extra_body для OpenAI-совместимых клиентов. LLM_TOP_K"
+        ),
+    )
     
     frequency_penalty: float = Field(
         default=DEFAULT_FREQUENCY_PENALTY,
@@ -212,6 +220,50 @@ class LLMConfig(BaseSettings):
         ),
     )
     
+    # Ремонт низкоуверенных токенов (live repair)
+    repair_mode: Optional[str] = Field(
+        default=None,
+        description=(
+            "Режим ремонта токенов: 'off' (по умолчанию), 'shadow' (теневой форк потока) "
+            "или 'server' (серверный порог выборки, при поддержке бэкенда). "
+            "Также настраивается через LLM_REPAIR_MODE."
+        ),
+        examples=["off", "shadow", "server"],
+    )
+    per_token_repair_threshold: Optional[float] = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Порог уверенности токена для live-ремонта. Токены с confidence ниже порога считаются "
+            "кандидатами на ремонт. LLM_PER_TOKEN_REPAIR_THRESHOLD"
+        ),
+    )
+    repair_window: Optional[int] = Field(
+        default=1,
+        ge=1,
+        description="Окно для принятия решения о ремонте (число последних токенов). LLM_REPAIR_WINDOW",
+    )
+    max_live_repairs: Optional[int] = Field(
+        default=8,
+        ge=0,
+        description="Макс. число одновременных/последовательных ремонтов в одном ответе. LLM_MAX_LIVE_REPAIRS",
+    )
+    max_attempts_per_token: Optional[int] = Field(
+        default=4,
+        ge=1,
+        description="Макс. число попыток перегенерации для ОДНОГО проблемного токена. LLM_MAX_ATTEMPTS_PER_TOKEN",
+    )
+    server_min_p: Optional[float] = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Серверный порог min_p для выборки (если поддерживается бэкендом, например vLLM). "
+            "Если не указан, будет использовано per_token_repair_threshold. LLM_SERVER_MIN_P"
+        ),
+    )
+
     # Настройки рассуждений (загружаются из LLM_ переменных окружения при наличии)
     reasoning_type: Optional[str] = Field(
         default=None,
@@ -408,6 +460,22 @@ class LLMConfig(BaseSettings):
             params["logprobs"] = self.logprobs
         if self.top_logprobs is not None and "top_logprobs" not in params:
             params["top_logprobs"] = self.top_logprobs
+        
+        # Поддержка кастомных sampling параметров через extra_body (для OpenAI-совместимых бэкендов)
+        extra_body = params.get("extra_body", {})
+        # Серверный режим ремонта: min_p
+        effective_repair_mode = (self.repair_mode or "off").lower()
+        if effective_repair_mode == "server":
+            min_p = self.server_min_p
+            if min_p is None:
+                min_p = self.per_token_repair_threshold
+            if min_p is not None and "min_p" not in extra_body:
+                extra_body["min_p"] = float(min_p)
+        # Top-k sampling
+        if getattr(self, "top_k", None) is not None and "top_k" not in extra_body:
+            extra_body["top_k"] = int(self.top_k)
+        if extra_body:
+            params["extra_body"] = extra_body
         
         # Удаляем None значения
         return {k: v for k, v in params.items() if v is not None}
